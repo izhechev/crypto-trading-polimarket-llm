@@ -111,7 +111,7 @@ def _handle_portfolio(chat_id: int) -> None:
                 pnl_str = f"  P&amp;L: {pnl_pct:+.1f}%"
             else:
                 pnl_str = ""
-            decimals = 2 if p.price_eur >= 1 else 4
+            decimals = 2 if p.price_eur >= 1 else 4 if p.price_eur >= 0.01 else 6 if p.price_eur >= 0.0001 else 8
             lines.append(
                 f"<b>{h['asset']}</b>  {amt:.4f} × €{p.price_eur:.{decimals}f}"
                 f" = €{eur_value:.2f}{pnl_str}"

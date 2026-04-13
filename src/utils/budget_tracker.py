@@ -40,18 +40,21 @@ def _db():
 
 
 def _ensure_table() -> None:
-    with _db() as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS llm_calls (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts          TEXT    NOT NULL,
-                model       TEXT    NOT NULL,
-                tokens_in   INTEGER NOT NULL DEFAULT 0,
-                tokens_out  INTEGER NOT NULL DEFAULT 0,
-                cost_usd    REAL    NOT NULL DEFAULT 0.0,
-                endpoint    TEXT    NOT NULL DEFAULT ''
-            )
-        """)
+    try:
+        with _db() as con:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS llm_calls (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts          TEXT    NOT NULL,
+                    model       TEXT    NOT NULL,
+                    tokens_in   INTEGER NOT NULL DEFAULT 0,
+                    tokens_out  INTEGER NOT NULL DEFAULT 0,
+                    cost_usd    REAL    NOT NULL DEFAULT 0.0,
+                    endpoint    TEXT    NOT NULL DEFAULT ''
+                )
+            """)
+    except Exception:
+        pass  # DB may be locked — will retry on next call
 
 
 _ensure_table()
@@ -67,7 +70,11 @@ _COST_PER_1M = {
     "sonnet":         {"in": 3.00,  "out": 15.00},  # Claude Sonnet 4.6
     "opus":           {"in": 15.00, "out": 75.00},  # Claude Opus 4.6
     "cohere_embed":   {"in": 0.12,  "out": 0.00},
+    "tavily":         {"in": 0.00,  "out": 0.00},   # Tracked by calls (credits), not tokens
 }
+
+# Tavily free tier: 1,000 credits/month. Each basic search = 1 credit.
+_TAVILY_MONTHLY_FREE = 1_000
 
 
 def _calc_cost(model: str, tokens_in: int, tokens_out: int) -> float:
@@ -231,3 +238,51 @@ def print_daily_summary() -> None:
         )
     print(f"  {'─'*50}")
     print(f"  Total cost today: ${total_cost:.4f}")
+
+
+def get_tavily_monthly_usage() -> dict:
+    """
+    Return Tavily usage for the current calendar month.
+    Each logged Tavily call = 1 credit used.
+    Returns {calls_this_month, credits_remaining, pct_used, days_left}.
+    """
+    from calendar import monthrange
+    now   = datetime.now(timezone.utc)
+    month = now.strftime("%Y-%m")
+    _, days_in_month = monthrange(now.year, now.month)
+    days_left = days_in_month - now.day
+
+    with _db() as con:
+        row = con.execute(
+            "SELECT COUNT(*) as calls FROM llm_calls "
+            "WHERE strftime('%Y-%m', ts) = ? AND model = 'tavily'",
+            (month,),
+        ).fetchone()
+
+    calls_used = row["calls"] if row else 0
+    remaining  = max(0, _TAVILY_MONTHLY_FREE - calls_used)
+    pct        = calls_used / _TAVILY_MONTHLY_FREE * 100
+
+    return {
+        "calls_this_month": calls_used,
+        "credits_remaining": remaining,
+        "pct_used":         pct,
+        "days_left":        days_left,
+        "monthly_cap":      _TAVILY_MONTHLY_FREE,
+    }
+
+
+def print_tavily_status() -> None:
+    """Print Tavily monthly credit usage to console."""
+    s = get_tavily_monthly_usage()
+    bar_filled = int(s["pct_used"] / 5)          # 20-char bar
+    bar        = "█" * bar_filled + "░" * (20 - bar_filled)
+    icon       = "🟢" if s["pct_used"] < 70 else ("🟡" if s["pct_used"] < 90 else "🔴")
+    print(f"\n  {icon}  Tavily AI — Monthly Credits")
+    print(f"  {'─'*40}")
+    print(f"  Used:      {s['calls_this_month']:>4} / {s['monthly_cap']} credits  ({s['pct_used']:.1f}%)")
+    print(f"  Remaining: {s['credits_remaining']:>4} credits")
+    print(f"  Days left: {s['days_left']} days in month")
+    print(f"  [{bar}]")
+    if s["credits_remaining"] < 100:
+        print(f"  ⚠️  Low credits — consider upgrading at app.tavily.com")

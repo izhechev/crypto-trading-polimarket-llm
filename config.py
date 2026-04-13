@@ -24,12 +24,18 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 CRYPTOCOMPARE_API_KEY = os.getenv("CRYPTOCOMPARE_API_KEY") or os.getenv("CRYPTO_COMPARE_API_KEY", "")
+TAVILY_API_KEY        = os.getenv("TAVILY_API_KEY", "")
+NEWSDATA_API_KEY      = os.getenv("NEWSDATA_API_KEY", "")
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY", "")
 KRAKEN_PRIVATE_KEY = os.getenv("KRAKEN_PRIVATE_KEY", "")
 DUNE_API_KEY = os.getenv("DUNE_API_KEY", "")
 COIN_MARKET_CAP_API_KEY = os.getenv("COIN_MARKET_CAP_API_KEY", "")
 MESSARI_API_KEY = os.getenv("MESSARI_API_KEY", "")
 ETHER_SCAN_API_KEY = os.getenv("ETHER_SCAN_API_KEY", "")
+
+# Serial scam / manipulation tracking is now fully automatic.
+# See src/agents/coin_risk_assessor.py — real-time detection via news + on-chain signals.
+# Cache stored in data/coin_risk_cache.json (24 h TTL).
 
 # === LLM Config (Groq free tier) ===
 LLM_MODEL = "llama-3.3-70b-versatile"  # Free on Groq

@@ -7,33 +7,76 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import config
 
 
-def send_telegram_to(chat_id: int | str, message: str) -> bool:
-    """Send a message to a specific chat_id. Used by the bot command handler."""
-    if not config.TELEGRAM_BOT_TOKEN:
-        return False
+_MAX_CHARS = 4000  # Telegram hard limit is 4096; stay safely under
+
+
+def _split_message(message: str) -> list[str]:
+    """
+    Split a message into chunks of at most _MAX_CHARS characters.
+    Splits on newlines where possible to avoid cutting mid-line.
+    """
+    if len(message) <= _MAX_CHARS:
+        return [message]
+
+    chunks: list[str] = []
+    while message:
+        if len(message) <= _MAX_CHARS:
+            chunks.append(message)
+            break
+        # Find last newline within the limit
+        cut = message.rfind("\n", 0, _MAX_CHARS)
+        if cut <= 0:
+            cut = _MAX_CHARS  # no newline found, hard cut
+        chunks.append(message[:cut])
+        message = message[cut:].lstrip("\n")
+
+    return chunks
+
+
+def _send_one(chat_id: int | str, text: str) -> bool:
+    """Send a single pre-sized chunk to Telegram."""
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         with httpx.Client(timeout=15) as client:
             resp = client.post(url, json={
-                "chat_id": chat_id,
-                "text": message,
+                "chat_id":    chat_id,
+                "text":       text,
                 "parse_mode": "HTML",
             })
             resp.raise_for_status()
         return True
     except Exception as e:
-        print(f"  Telegram reply error: {e}")
+        print(f"  Telegram send error: {e}")
         return False
+
+
+def send_telegram_to(chat_id: int | str, message: str) -> bool:
+    """Send a message to a specific chat_id, splitting if over 4000 chars."""
+    if not config.TELEGRAM_BOT_TOKEN:
+        return False
+    chunks = _split_message(message)
+    ok = True
+    for i, chunk in enumerate(chunks, 1):
+        if len(chunks) > 1:
+            chunk = f"({i}/{len(chunks)})\n" + chunk
+        ok = _send_one(chat_id, chunk) and ok
+    return ok
 
 
 def send_telegram(message: str) -> bool:
-    """Send a message to the configured Telegram chat. Returns True on success."""
+    """Send a message to the configured Telegram chat, splitting if over 4000 chars."""
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         print("  Telegram: BOT_TOKEN or CHAT_ID not set in .env — skipping")
         return False
-    ok = send_telegram_to(config.TELEGRAM_CHAT_ID, message)
+    chunks = _split_message(message)
+    ok = True
+    for i, chunk in enumerate(chunks, 1):
+        if len(chunks) > 1:
+            chunk = f"({i}/{len(chunks)})\n" + chunk
+        ok = _send_one(config.TELEGRAM_CHAT_ID, chunk) and ok
     if ok:
-        print("  Telegram alert sent")
+        n = len(chunks)
+        print(f"  Telegram alert sent ({n} message{'s' if n > 1 else ''})")
     return ok
 
 

@@ -33,6 +33,9 @@ aiosqlite>=0.20
 # Reddit
 praw>=7.7
 
+# Web search (free, no API key needed — fallback when Tavily key not set)
+duckduckgo-search>=6.0
+
 # Dashboard (Phase 4)
 streamlit>=1.35
 plotly>=5.20

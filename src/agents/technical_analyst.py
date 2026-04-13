@@ -1,7 +1,37 @@
-"""Technical Analysis using pandas-ta. Pure Python, no C deps."""
+"""Technical Analysis with pandas-ta (with pure-pandas fallback)."""
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
+try:
+    import pandas_ta as ta
+    HAS_PTA = True
+except ImportError:
+    HAS_PTA = False
 from src.models.crypto import TechnicalAnalysis
+
+
+# ── Pure-pandas fallback helpers (no C deps) ────────────────────────
+def _ema(series: pd.Series, length: int) -> pd.Series:
+    return series.ewm(span=length, adjust=False).mean()
+
+def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/length, min_periods=length).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/length, min_periods=length).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+def _macd(series: pd.Series):
+    fast = _ema(series, 12)
+    slow = _ema(series, 26)
+    macd_line = fast - slow
+    signal = _ema(macd_line, 9)
+    hist = macd_line - signal
+    return pd.DataFrame({"MACD": macd_line, "MACDh": hist, "MACDs": signal})
+
+def _bbands(series: pd.Series, length: int = 20, std: float = 2):
+    mid = series.rolling(length).mean()
+    s = series.rolling(length).std()
+    return pd.DataFrame({"BBL": mid - std * s, "BBM": mid, "BBU": mid + std * s})
 
 
 def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAnalysis:
@@ -21,11 +51,13 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
     price = df["close"].iloc[-1]
 
     # RSI
-    rsi_series = ta.rsi(df["close"], length=14)
+    rsi_fn = ta.rsi if HAS_PTA else _rsi
+    rsi_series = rsi_fn(df["close"], length=14)
     rsi = float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else None
 
     # MACD
-    macd_df = ta.macd(df["close"])
+    macd_fn = ta.macd if HAS_PTA else _macd
+    macd_df = macd_fn(df["close"])
     macd_signal = "NEUTRAL"
     if macd_df is not None and not macd_df.empty:
         macd_line = macd_df.iloc[-1, 0]
@@ -36,7 +68,8 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
             macd_signal = "BEARISH"
 
     # Bollinger Bands
-    bbands = ta.bbands(df["close"], length=20, std=2)
+    bbands_fn = ta.bbands if HAS_PTA else _bbands
+    bbands = bbands_fn(df["close"], length=20, std=2)
     bb_position = "MIDDLE"
     if bbands is not None and not bbands.empty:
         upper = bbands.iloc[-1, 2]  # BBU
@@ -47,9 +80,10 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
             bb_position = "BELOW_LOWER"
 
     # EMAs
-    ema_20 = ta.ema(df["close"], length=20)
-    ema_50 = ta.ema(df["close"], length=50) if len(df) >= 50 else None
-    ema_200 = ta.ema(df["close"], length=200) if len(df) >= 200 else None
+    ema_fn = ta.ema if HAS_PTA else _ema
+    ema_20 = ema_fn(df["close"], length=20)
+    ema_50 = ema_fn(df["close"], length=50) if len(df) >= 50 else None
+    ema_200 = ema_fn(df["close"], length=200) if len(df) >= 200 else None
 
     ema_20_val = float(ema_20.iloc[-1]) if ema_20 is not None and not ema_20.empty else None
     ema_50_val = float(ema_50.iloc[-1]) if ema_50 is not None and not ema_50.empty else None
