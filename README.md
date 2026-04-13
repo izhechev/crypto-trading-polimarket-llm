@@ -1,68 +1,65 @@
-# 🧠 CryptoAdvisor LLM
+# CryptoAdvisor LLM
 
-Personal crypto analyzer with technical analysis, sentiment tracking, and Polymarket odds monitoring.
+AI-powered crypto scanner and trading advisor. Scans top 1000 coins, runs technical analysis, detects whale pumps, tracks Polymarket odds, and sends Telegram alerts — all on free APIs.
+
+## Features
+
+- **Smart Scanner** — scans top 1000 CoinGecko coins, scores by TA (RSI, MACD, Bollinger, EMA), Fear & Greed, volume/mcap. Groq LLM picks top 10 with entry/SL/TP
+- **Whale Rider** — detects coins pumping +10% in 24h with high vol/mcap ratio. Tracks milestone profits (+25%, +50%) without closing the position. Closes at +200% only
+- **Risk Assessor** — flags scam patterns (serial pump & dump, rug pulls, dilution). Groq + NewsData.io news verification for serious flags
+- **News Pipeline** — NewsData.io (6,000 free/month) → DuckDuckGo fallback. Groq summarises per-coin headlines into one sentence
+- **Polymarket Advisor** — tracks prediction market odds and surfaces tradeable events
+- **Telegram Bot** — all alerts, scanner picks, whale rides, and milestone notifications
+- **Track Record** — logs all scanner picks and whale rides. Separate win/loss stats for scanner vs whale rides. Milestone wins tracked independently
 
 ## Quick Start
 
 ```bash
-# 1. Clone / enter directory
-cd crypto-advisor
-
-# 2. Create virtual environment
-python -m venv .venv && source .venv/bin/activate
-
-# 3. Install dependencies
+git clone https://github.com/izhechev/crypto-trading-polimarket-llm.git
+cd crypto-trading-polimarket-llm
+python -m venv .venv && .venv\Scripts\activate  # Windows
 pip install -r requirements.txt
-
-# 4. Set up environment variables
-cp .env.example .env
-# Edit .env and fill in your API keys (most are free)
-
-# 5. Run it
+cp .env.example .env   # fill in API keys
 python run.py
 ```
 
-## What it does (Phase 1)
+## API Keys
 
-- Fetches live prices for BTC, ETH, INJ, RENDER, DOT
-- Computes technical indicators (RSI, MACD, Bollinger, EMA)
-- Shows Fear & Greed Index
-- Tracks your portfolio P&L
-- All free APIs, no paid subscriptions needed
+| Key | Where to get | Cost |
+|-----|-------------|------|
+| `COINGECKO_API_KEY` | coingecko.com/api | Free |
+| `GROQ_API_KEY` | console.groq.com | Free |
+| `NEWSDATA_API_KEY` | newsdata.io | Free (6K/month) |
+| `TELEGRAM_BOT_TOKEN` | @BotFather on Telegram | Free |
+| `TELEGRAM_CHAT_ID` | your chat ID | Free |
+| `TAVILY_API_KEY` | tavily.com | Free (1K/month) |
 
-## Budget: €9/month
-
-| Item | Cost |
-|------|------|
-| Hetzner VPS (optional) | €8 |
-| All APIs | Free |
-| LLM (Groq free tier) | Free |
-| **Total** | **€0-8** |
+All others in `.env.example` are optional.
 
 ## Project Structure
 
 ```
-crypto-advisor/
 ├── run.py                          # Main entry point
-├── config.py                       # Configuration
-├── portfolio.json                  # Your holdings
-├── requirements.txt                # Python dependencies
-├── .env.example                    # API keys template
-└── src/
-    ├── agents/
-    │   └── technical_analyst.py    # TA with pandas-ta
-    ├── connectors/
-    │   └── coingecko.py            # CoinGecko + Fear&Greed
-    ├── models/
-    │   └── crypto.py               # All Pydantic models
-    └── utils/                      # Rate limiter, budget tracker (TODO)
+├── config.py                       # All config & API keys
+├── debug_news.py                   # Debug news pipeline standalone
+├── src/
+│   ├── agents/
+│   │   ├── scanner.py              # Top 1000 coin scanner + scoring
+│   │   ├── coin_risk_assessor.py   # Scam/risk detection
+│   │   ├── whale_rider.py          # Whale pump detector
+│   │   ├── groq_analyst.py         # Groq LLM analysis
+│   │   ├── technical_analyst.py    # RSI, MACD, Bollinger, EMA
+│   │   └── sentiment_analyst.py    # Fear & Greed + sentiment
+│   ├── connectors/
+│   │   ├── coingecko.py            # Prices, market data
+│   │   ├── web_research.py         # NewsData.io + DuckDuckGo + RSS
+│   │   └── polymarket.py           # Prediction market odds
+│   └── utils/
+│       ├── logger.py               # Trade logging, stats, win/loss tracking
+│       ├── telegram.py             # Alert sender
+│       └── budget_tracker.py       # API usage tracking
 ```
 
-## Next Steps
+## Cost
 
-- [ ] Phase 1: Add Telegram alerts
-- [ ] Phase 1: Add Groq LLM analysis (free tier)
-- [ ] Phase 2: Add Sentiment Agent + Polymarket tracking
-- [ ] Phase 3: Add RAG + Bull/Bear debate
-- [ ] Phase 4: Streamlit dashboard
-- [ ] Phase 5: Paper trading
+Everything runs free. Optional VPS ~€8/month.
