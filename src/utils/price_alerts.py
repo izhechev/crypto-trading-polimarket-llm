@@ -168,14 +168,49 @@ def check_price_alerts() -> None:
         key     = _position_key(row)
         fired   = state.setdefault(key, set())
 
-        # ── Whale ride: milestone alerts (no trailing stops) ─────────────
+        # ── Whale ride: milestone alerts + immediate WIN record logging ──
         if row.get("type") == "WHALE_RIDE":
+            _SCORES = {25: 1, 50: 2, 100: 3, 200: 4}
             for threshold, msg_tmpl in _WHALE_MILESTONES:
                 label = f"whale_{threshold:.0f}"
                 if pnl_pct >= threshold and label not in fired:
                     msg = msg_tmpl.format(coin=coin, price=usd, pnl=pnl_pct)
                     _alert(msg)
                     fired.add(label)
+                    dirty_csv = True
+
+                    # Log WHALE_MILESTONE WIN record immediately (don't wait for hourly scan)
+                    pct   = int(threshold)
+                    score = _SCORES.get(pct, "")
+                    flag  = f"[MILESTONE_{pct}]"
+                    # Stamp the flag into reasoning to prevent double-logging by update_open_positions
+                    if flag not in row.get("reasoning", ""):
+                        row["reasoning"] = (row.get("reasoning", "") + f" {flag}").strip()
+                    # Append milestone WIN record to rows list
+                    from datetime import datetime, timezone as _tz
+                    _ms = {
+                        "date":          row.get("date", ""),
+                        "type":          "WHALE_MILESTONE",
+                        "coin":          row.get("coin", ""),
+                        "coin_id":       row.get("coin_id", ""),
+                        "entry_price":   row.get("entry_price", ""),
+                        "stop_loss":     "",
+                        "take_profit":   "",
+                        "status":        "WIN",
+                        "exit_price":    round(usd, 8),
+                        "close_date":    datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                        "pnl_pct":       float(pct),
+                        "current_price": round(usd, 8),
+                        "price_eur":     "",
+                        "timeframe":     "",
+                        "fear_greed":    row.get("fear_greed", ""),
+                        "reasoning":     f"[WHALE_MILESTONE +{pct}% / {score}pt] Partial win — position stays open",
+                        "groq_rank":     score,
+                        "qualifier":     "WHALE_RIDE",
+                        "key_signal":    "",
+                    }
+                    rows.append(_ms)
+                    print(f"  [milestone] {coin} +{pct}% ({score}pt) WIN record logged immediately")
 
         # ── Normal scanner picks: PnL-based alerts ───────────────────────
         else:
