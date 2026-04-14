@@ -203,7 +203,7 @@ def analyze_with_groq(
     pump_section = ""
     if pump_alerts:
         pump_lines = []
-        for c in pump_alerts:
+        for c in [c for c in pump_alerts if c.get("symbol", "").upper() not in _open_set]:
             sym  = c.get("symbol", "").upper()
             ch7d = c.get("price_change_percentage_7d_in_currency") or 0
             ch24 = c.get("price_change_percentage_24h") or 0
