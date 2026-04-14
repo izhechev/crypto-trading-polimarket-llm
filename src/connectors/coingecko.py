@@ -9,6 +9,25 @@ from src.models.crypto import CryptoPrice
 _cache: dict[str, tuple[float, any]] = {}
 CACHE_TTL = 240  # 4 minutes
 
+# ── CoinGecko call counter (real HTTP requests only, cache hits excluded) ──
+_CG_CALLS: int = 0
+
+
+def _cg_get(client: httpx.Client, url: str, **kwargs) -> httpx.Response:
+    """Thin wrapper around client.get that increments the call counter."""
+    global _CG_CALLS
+    _CG_CALLS += 1
+    return client.get(url, **kwargs)
+
+
+def get_cg_call_count() -> int:
+    return _CG_CALLS
+
+
+def reset_cg_call_count() -> None:
+    global _CG_CALLS
+    _CG_CALLS = 0
+
 
 def _get_cached(key: str):
     if key in _cache:
@@ -46,7 +65,7 @@ def _fetch_eur_prices(coin_ids: list[str]) -> dict[str, float]:
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {"ids": ",".join(coin_ids), "vs_currencies": "eur"}
         with httpx.Client(timeout=15) as client:
-            resp = client.get(url, params=params, headers=_headers())
+            resp = _cg_get(client, url, params=params, headers=_headers())
             resp.raise_for_status()
             raw = resp.json()
         result = {cid: data.get("eur", 0.0) for cid, data in raw.items()}
@@ -75,7 +94,7 @@ def fetch_prices(coin_ids: list[str]) -> list[CryptoPrice]:
     }
 
     with httpx.Client(timeout=30) as client:
-        resp = client.get(url, params=params, headers=_headers())
+        resp = _cg_get(client, url, params=params, headers=_headers())
         resp.raise_for_status()
         data = resp.json()
 
@@ -118,7 +137,7 @@ def fetch_ohlcv(coin_id: str, days: int = 30) -> list[dict]:
     params = {"vs_currency": "usd", "days": str(days)}
 
     with httpx.Client(timeout=30) as client:
-        resp = client.get(url, params=params, headers=_headers())
+        resp = _cg_get(client, url, params=params, headers=_headers())
         resp.raise_for_status()
         data = resp.json()
 

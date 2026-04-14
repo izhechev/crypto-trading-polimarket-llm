@@ -943,6 +943,17 @@ def run_scan_cycle(
 
         send_telegram(msg)
 
+    # CoinGecko call count for this cycle
+    try:
+        from src.connectors.coingecko import get_cg_call_count, reset_cg_call_count
+        _cg = get_cg_call_count()
+        print(f"\n  [CG USAGE] {_cg} calls this cycle | "
+              f"monthly pace: {_cg * 30 * 6:,} | "
+              f"limit: 10,000")
+        reset_cg_call_count()
+    except Exception:
+        pass
+
     # LLM usage summary
     try:
         from src.utils.budget_tracker import print_daily_summary
