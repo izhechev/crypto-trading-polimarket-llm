@@ -604,15 +604,13 @@ def run_scan_cycle(
     if not skip_groq and quality_count_new >= 1 and groq_candidates:
         log_scanner_results(groq_candidates, fg.get("value", 0))
 
-    # After logging, find which coins got an OPEN SCANNER position this cycle.
-    # Only scanner picks are eligible for display — whale ride coins must not leak through
-    # even if Groq hallucinates them (they were already excluded from new_candidates).
+    # Filter recs to only symbols that actually went through the Groq pre-filter.
+    # This is the definitive guard: if a coin wasn't in groq_candidates it can't
+    # be a valid pick — catches hallucinations AND whale-ride coins that Groq
+    # somehow returns despite being excluded from the candidate list.
     # Exception: fallback picks were never logged (Groq was down) — keep them as-is.
-    _open_scanner_coins = {
-        r.get("coin", "").upper() for r in _log_read()
-        if r.get("status") == "OPEN" and r.get("type", "") in ("SCANNER", "")
-    }
-    recs = [r for r in recs if r.get("_groq_fallback") or r.get("coin", "").upper() in _open_scanner_coins]
+    _gc_syms = {r.get("symbol", "").upper() for r in groq_candidates}
+    recs = [r for r in recs if r.get("_groq_fallback") or r.get("coin", "").upper() in _gc_syms]
 
     # Stamp Groq's rank + qualifier + key_signal onto each pick's CSV row
     for rec in recs:
