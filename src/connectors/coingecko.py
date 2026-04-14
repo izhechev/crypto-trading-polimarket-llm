@@ -5,9 +5,11 @@ from datetime import datetime
 from tenacity import retry, wait_exponential, stop_after_attempt
 from src.models.crypto import CryptoPrice
 
-# Simple in-memory cache
+# Simple in-memory cache — 60 min TTL matches the hourly scan cycle.
+# Whale check runs every 15 min but fetches its own coin list; these
+# caches cover fetch_prices / fetch_ohlcv / fetch_fear_greed calls.
 _cache: dict[str, tuple[float, any]] = {}
-CACHE_TTL = 240  # 4 minutes
+CACHE_TTL = 3600  # 60 minutes
 
 # ── CoinGecko call counter (real HTTP requests only, cache hits excluded) ──
 _CG_CALLS: int = 0

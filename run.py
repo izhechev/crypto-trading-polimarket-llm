@@ -152,7 +152,7 @@ def run_portfolio_check(prices: dict):
     print(f"\n  {icon} TOTAL: €{total_eur:.2f} / invested ≈€{total_cost_eur:.2f} / P&L: €{total_pnl_eur:+.2f} ({total_pnl_pct:+.1f}%)")
 
 
-# ── Whale ride check (every 5 min) ───────────────────────────────────────────
+# ── Whale ride check (every 15 min) ──────────────────────────────────────────
 
 # Cache Kraken symbols for 1 hour — Kraken list changes rarely, no need to refetch every 5 min
 _kraken_symbols_cache: set[str] = set()
@@ -178,15 +178,30 @@ def _get_kraken_symbols_cached() -> set[str]:
     return _kraken_symbols_cache
 
 
+_whale_coins_cache: list[dict] = []
+_whale_coins_ts: float = 0.0
+_WHALE_COINS_TTL: int = 3600  # 1 hour — top-1000 list doesn't change every 15 min
+
+
 def _fetch_coins_whale(pages: int = 3) -> list[dict]:
     """
     Fetch up to pages×250 coins from CoinGecko for whale detection.
     pages=3 → 750 coins.  pages=4 → 1,000 coins.
+    Cached for 1 hour — top-1000 ranking is stable between checks.
     Paces requests at 1 s apart to stay within rate limits.
     """
     import time as _time
     import httpx
     import config as _cfg
+    from src.connectors.coingecko import get_cg_call_count  # noqa: used indirectly via _cg_get
+
+    global _whale_coins_cache, _whale_coins_ts
+
+    age = _time.time() - _whale_coins_ts
+    if _whale_coins_cache and age < _WHALE_COINS_TTL:
+        print(f"  [CG cache] whale coins: using cached data ({age/60:.0f}min old, "
+              f"refreshes in {(_WHALE_COINS_TTL - age)/60:.0f}min)")
+        return _whale_coins_cache
 
     all_coins: list[dict] = []
     headers = {}
@@ -196,7 +211,10 @@ def _fetch_coins_whale(pages: int = 3) -> list[dict]:
     for page in range(1, pages + 1):
         try:
             with httpx.Client(timeout=30) as client:
-                resp = client.get(
+                # Count against CG quota
+                from src.connectors.coingecko import _cg_get
+                resp = _cg_get(
+                    client,
                     "https://api.coingecko.com/api/v3/coins/markets",
                     params={
                         "vs_currency":            "usd",
@@ -219,14 +237,19 @@ def _fetch_coins_whale(pages: int = 3) -> list[dict]:
         if page < pages:
             _time.sleep(1.2)   # pace: ~0.8 req/s, well within 30 req/min limit
 
+    if all_coins:
+        _whale_coins_cache = all_coins
+        _whale_coins_ts    = _time.time()
+        print(f"  [CG cache] whale coins: fetched {len(all_coins)} coins, cached for 60min")
+
     return all_coins
 
 
 def run_whale_check() -> None:
     """
-    Lightweight 5-minute whale ride detector.
-    Fetches top 1000 coins (4 pages), filters to Kraken-listed only,
-    runs volume-anomaly detection, sends Telegram immediately on signal.
+    Lightweight whale ride detector — runs every 15 min.
+    Coin list cached 1 hour (4 pages × 250 = 1,000 coins) — fetched once
+    per hour, reused across the 3 checks within that hour.
     No Groq, no full TA — fastest possible whale catch.
     """
     try:
@@ -1077,10 +1100,10 @@ def main():
         scheduler.add_job(
             run_whale_check,
             trigger="interval",
-            minutes=5,
+            minutes=15,
             id="whale_check",
         )
-        print(f"\n  Scheduler running — full scan every 1h, whale check every 5min. Ctrl+C to stop.\n")
+        print(f"\n  Scheduler running — full scan every 1h, whale check every 15min. Ctrl+C to stop.\n")
         try:
             scheduler.start()
         except KeyboardInterrupt:
@@ -1118,10 +1141,10 @@ def main():
         scheduler.add_job(
             run_whale_check,
             trigger="interval",
-            minutes=5,
+            minutes=15,
             id="whale_check",
         )
-        print(f"\n  Crypto scheduler running — full scan every 1h, whale check every 5min. Ctrl+C to stop.\n")
+        print(f"\n  Crypto scheduler running — full scan every 1h, whale check every 15min. Ctrl+C to stop.\n")
         try:
             scheduler.start()
         except KeyboardInterrupt:
