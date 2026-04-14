@@ -2,10 +2,13 @@
 Price alert monitor — runs every 15 minutes, no Groq needed.
 
 Whale ride milestones (checked every run):
-  +25%   → alert: consider taking 25% profit
-  +50%   → alert + move SL to entry (breakeven)
-  +100%  → alert + move SL to +50%
-  +150%  → alert + trailing stop to +100%
+  +25%   → alert: first milestone hit
+  +50%   → alert: double milestone
+  +100%  → alert: triple milestone
+  +150%  → alert: on the way to +200%
+  +200%  → alert: TP hit — close position
+
+No trailing stops. Positions only close at TP (+200%) or pnl <= -100%.
 
 Normal scanner picks (checked every run):
   PnL >= +8%  → approaching TP alert  (2% before TP of +10%)
@@ -27,13 +30,14 @@ import config
 _ALERT_STATE_PATH = config.DATA_DIR / "alert_state.json"
 _CSV_PATH         = config.DATA_DIR / "recommendations.csv"
 
-# Whale ride milestones: pnl threshold → (message suffix, new SL pct or None)
-# new SL pct is relative to entry: 0.0 = breakeven, 0.50 = +50%, 1.0 = +100%
+# Whale ride milestones: pnl threshold → message template
+# No trailing stops — positions hold until TP (+200%) or pnl <= -100%
 _WHALE_MILESTONES = [
-    (150.0, "🐋 {coin} +150% (${price:.4f}) — trailing stop activated",    1.00),
-    (100.0, "🐋 {coin} +100% (${price:.4f}) — take profit, move SL to +50%", 0.50),
-    ( 50.0, "🐋 {coin}  +50% (${price:.4f}) — move SL to entry (breakeven)", 0.00),
-    ( 25.0, "🐋 {coin}  +25% (${price:.4f}) — consider taking 25% profit",   None),
+    (200.0, "🌙 {coin} +200% (${price:.4f}) — TP hit! Close position ✅"),
+    (150.0, "🚀 {coin} +150% (${price:.4f}) — on the way to +200%!"),
+    (100.0, "🚀 {coin} +100% (${price:.4f}) — 3× milestone hit!"),
+    ( 50.0, "🚀 {coin}  +50% (${price:.4f}) — 2× milestone hit!"),
+    ( 25.0, "🚀 {coin}  +25% (${price:.4f}) — 1× milestone hit!"),
 ]
 
 _TP_ALERT_PNL = 8.0    # alert when pnl >= +8%  (2% before TP of +10%)
@@ -164,22 +168,14 @@ def check_price_alerts() -> None:
         key     = _position_key(row)
         fired   = state.setdefault(key, set())
 
-        # ── Whale ride: milestone alerts + trailing stop updates ──────────
+        # ── Whale ride: milestone alerts (no trailing stops) ─────────────
         if row.get("type") == "WHALE_RIDE":
-            for threshold, msg_tmpl, new_sl_pct in _WHALE_MILESTONES:
+            for threshold, msg_tmpl in _WHALE_MILESTONES:
                 label = f"whale_{threshold:.0f}"
                 if pnl_pct >= threshold and label not in fired:
                     msg = msg_tmpl.format(coin=coin, price=usd, pnl=pnl_pct)
                     _alert(msg)
                     fired.add(label)
-
-                    # Update trailing stop in CSV
-                    if new_sl_pct is not None:
-                        new_sl = entry * (1 + new_sl_pct)
-                        if new_sl > sl:  # only move SL up, never down
-                            row["stop_loss"] = round(new_sl, 6)
-                            dirty_csv = True
-                            print(f"  [alerts] {coin} SL updated: ${sl:.4f} → ${new_sl:.4f} (trailing)")
 
         # ── Normal scanner picks: PnL-based alerts ───────────────────────
         else:
