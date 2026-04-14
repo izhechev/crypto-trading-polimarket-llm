@@ -435,17 +435,26 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
         print("  Groq returned no picks.")
         return None, groq_candidates
 
+    # Backfill entry_price from scanner data when Groq returns null/0.
+    # Groq is not reliable at echoing prices — use the scanner's live price instead.
+    _price_map = {r.get("symbol", "").upper(): r.get("price", 0) for r in top10}
+    for _pick in raw_picks:
+        _sym = (_pick.get("coin") or "").upper()
+        _ep  = _pick.get("entry_price")
+        if (not _ep or (isinstance(_ep, (int, float)) and _ep <= 0)) and _sym in _price_map:
+            _pick["entry_price"] = _price_map[_sym]
+            print(f"  [entry_price] {_sym}: backfilled from scanner (Groq returned null)")
+
     def _fmt(val):
         if not isinstance(val, (int, float)):
             return str(val)
         if val == 0:
             return "$0"
         if val >= 1:
-            return f"${val:,.4f}"
-        # Sub-penny: show enough significant figures
-        import math
-        sig = max(4, -int(math.floor(math.log10(abs(val)))) + 2)
-        return f"${val:.{sig}f}"
+            return f"${val:,.2f}"
+        if val >= 0.01:
+            return f"${val:.4f}"
+        return f"${val:.8f}"
 
     def _apply_guards(rec: dict) -> dict:
         """Apply TP cap, RSI guard, and F&G filter to a single pick. Mutates in place."""
