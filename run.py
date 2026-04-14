@@ -419,10 +419,10 @@ def run_scan_cycle(
             if not isinstance(v, (int, float)) or v == 0:
                 return "$0"
             if v >= 1:
-                return f"${v:,.4f}"
-            import math as _m
-            sig = max(4, -int(_m.floor(_m.log10(abs(v)))) + 2)
-            return f"${v:.{sig}f}"
+                return f"${v:,.2f}"
+            if v >= 0.01:
+                return f"${v:.4f}"
+            return f"${v:.8f}"
 
         for wr in whale_rides:
             log_whale_ride(wr, fg.get("value", 0))
@@ -521,12 +521,23 @@ def run_scan_cycle(
     # ── DATA COLLECTION MODE: always open picks if score ≥ 2, no position cap ──
     from src.utils.logger import _read as _log_read, update_groq_rank
     _log_rows = _log_read()
-    _already_open_syms = {
+    _already_open_scanner = {
         r.get("coin", "").upper()
         for r in _log_rows
         if r.get("type", "") in ("SCANNER", "") and r.get("status") == "OPEN"
     }
-    _open_quality_positions = len(_already_open_syms)
+    _already_open_whale = {
+        r.get("coin", "").upper()
+        for r in _log_rows
+        if r.get("type") == "WHALE_RIDE" and r.get("status") == "OPEN"
+    }
+    _already_open_syms = _already_open_scanner | _already_open_whale
+    _open_quality_positions = len(_already_open_scanner)
+
+    # Log pre-filter removals for coins that are open as whale rides
+    _top10_syms = {r["symbol"].upper() for r in top10}
+    for _wr_sym in _already_open_whale & _top10_syms:
+        print(f"  Pre-filter removed: {_wr_sym} (already OPEN as whale_ride)")
 
     # Split top10 into already-open vs genuinely new candidates
     new_candidates    = [r for r in top10 if r["symbol"].upper() not in _already_open_syms]
@@ -676,6 +687,19 @@ def run_scan_cycle(
     # Never invent new picks just to fill 3 slots.
     display_recs = recs_for_display or []
 
+    # Bug 1 fix: skip non-fallback recs where entry_price is missing or zero
+    _valid_display = []
+    for _dr in display_recs:
+        if _dr.get("_groq_fallback"):
+            _valid_display.append(_dr)
+            continue
+        _ep = _dr.get("entry_price")
+        if _ep is None or (isinstance(_ep, (int, float)) and _ep <= 0):
+            print(f"  ⚠️  Skipped {_dr.get('coin', '?')}: price unavailable")
+            continue
+        _valid_display.append(_dr)
+    display_recs = _valid_display
+
     # Open positions sorted by closeness to TP (ascending = closest first)
     open_portfolio_rows = [
         r for r in _log_rows
@@ -702,10 +726,10 @@ def run_scan_cycle(
         if v == 0:
             return "$0"
         if v >= 1:
-            return f"${v:,.4f}"
-        import math as _math
-        sig = max(4, -int(_math.floor(_math.log10(abs(v)))) + 2)
-        return f"${v:.{sig}f}"
+            return f"${v:,.2f}"
+        if v >= 0.01:
+            return f"${v:.4f}"
+        return f"${v:.8f}"
 
     if display_recs or open_portfolio_rows:
         fg_value_msg = fg.get("value", "?")
