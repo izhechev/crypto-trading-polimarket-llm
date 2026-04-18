@@ -97,16 +97,45 @@ def _write_csv(rows: list[dict]) -> None:
 # ── Price fetch ───────────────────────────────────────────────────────────
 
 def _fetch_prices_usd(coin_ids: list[str]) -> dict[str, float]:
-    """Fetch current USD prices from CoinGecko free API."""
+    """
+    Fetch current USD prices keyed by coin_id.
+    Tries CoinGecko first (handles CG-format IDs like 'solana').
+    For IDs not resolved, tries CoinPaprika by exact _cp_id match — never by symbol.
+    """
     if not coin_ids:
         return {}
+
+    result: dict[str, float] = {}
+
+    # CoinGecko first
     try:
         from src.connectors.coingecko import fetch_prices
         price_objs = fetch_prices(coin_ids)
-        return {p.coin_id: p.price_usd for p in price_objs}
+        for p in price_objs:
+            result[p.coin_id] = p.price_usd
     except Exception as e:
-        print(f"  [alerts] price fetch failed: {e}")
-        return {}
+        print(f"  [alerts] CoinGecko price fetch failed: {e} — trying CoinPaprika")
+
+    missing = [cid for cid in coin_ids if cid not in result]
+    if not missing:
+        return result
+
+    # CoinPaprika fallback: match by exact _cp_id, never by symbol
+    try:
+        from src.connectors.coinpaprika import fetch_tickers_for_scanner
+        tickers = fetch_tickers_for_scanner(limit=1000)
+        cp_id_price = {
+            c["_cp_id"]: c["current_price"]
+            for c in tickers
+            if c.get("_cp_id") and c.get("current_price")
+        }
+        for cid in missing:
+            if cid in cp_id_price:
+                result[cid] = cp_id_price[cid]
+    except Exception as e2:
+        print(f"  [alerts] CoinPaprika price fetch failed: {e2}")
+
+    return result
 
 
 # ── Telegram send ─────────────────────────────────────────────────────────
@@ -146,6 +175,14 @@ def check_price_alerts() -> None:
     if not usd_map:
         return
 
+    # entry_price map for sanity checks (coin_id → entry_price)
+    entry_map: dict[str, float] = {}
+    for r in open_rows:
+        try:
+            entry_map[r["coin_id"]] = float(r["entry_price"])
+        except (ValueError, KeyError, TypeError):
+            pass
+
     for row in rows:
         if row.get("status") != "OPEN" or not row.get("coin_id"):
             continue
@@ -155,6 +192,18 @@ def check_price_alerts() -> None:
         usd = usd_map.get(row["coin_id"])
         if usd is None:
             continue
+
+        # Sanity check: skip if fetched price deviates >90% from entry
+        _entry_check = entry_map.get(row["coin_id"], 0)
+        if _entry_check > 0:
+            _ratio = usd / _entry_check
+            if _ratio < 0.1 or _ratio > 10:
+                print(
+                    f"  [alerts] SANITY SKIP {row.get('coin','?')} "
+                    f"fetched=${usd:.6f} vs entry=${_entry_check:.6f} "
+                    f"(ratio {_ratio:.2f}) — likely wrong coin_id"
+                )
+                continue
 
         try:
             entry = float(row["entry_price"])
@@ -170,7 +219,7 @@ def check_price_alerts() -> None:
 
         # ── Whale ride: milestone alerts + immediate WIN record logging ──
         if row.get("type") == "WHALE_RIDE":
-            _SCORES = {25: 1, 50: 2, 100: 3, 200: 4}
+            _SCORES = {25: 1, 50: 2, 100: 3, 150: 3, 200: 4}
             for threshold, msg_tmpl in _WHALE_MILESTONES:
                 label = f"whale_{threshold:.0f}"
                 if pnl_pct >= threshold and label not in fired:
@@ -179,15 +228,20 @@ def check_price_alerts() -> None:
                     fired.add(label)
                     dirty_csv = True
 
-                    # Log WHALE_MILESTONE WIN record immediately (don't wait for hourly scan)
                     pct   = int(threshold)
                     score = _SCORES.get(pct, "")
                     flag  = f"[MILESTONE_{pct}]"
                     # Stamp the flag into reasoning to prevent double-logging by update_open_positions
                     if flag not in row.get("reasoning", ""):
                         row["reasoning"] = (row.get("reasoning", "") + f" {flag}").strip()
-                    # Append milestone WIN record to rows list
+
+                    # Every milestone creates a WIN record; position stays open
                     from datetime import datetime, timezone as _tz
+                    try:
+                        _entry_f = float(row.get("entry_price") or 0)
+                        _ms_price = round(_entry_f * (1 + pct / 100), 8) if _entry_f > 0 else round(usd, 8)
+                    except (ValueError, TypeError):
+                        _ms_price = round(usd, 8)
                     _ms = {
                         "date":          row.get("date", ""),
                         "type":          "WHALE_MILESTONE",
@@ -197,7 +251,7 @@ def check_price_alerts() -> None:
                         "stop_loss":     "",
                         "take_profit":   "",
                         "status":        "WIN",
-                        "exit_price":    round(usd, 8),
+                        "exit_price":    _ms_price,
                         "close_date":    datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M UTC"),
                         "pnl_pct":       float(pct),
                         "current_price": round(usd, 8),
@@ -209,8 +263,16 @@ def check_price_alerts() -> None:
                         "qualifier":     "WHALE_RIDE",
                         "key_signal":    "",
                     }
-                    rows.append(_ms)
-                    print(f"  [milestone] {coin} +{pct}% ({score}pt) WIN record logged immediately")
+                    _already = any(
+                        r.get("type") == "WHALE_MILESTONE"
+                        and r.get("coin", "").upper() == _ms["coin"].upper()
+                        and r.get("date", "") == _ms["date"]
+                        and str(r.get("pnl_pct", "")) == str(_ms["pnl_pct"])
+                        for r in rows
+                    )
+                    if not _already:
+                        rows.append(_ms)
+                        print(f"  [milestone] {coin} +{pct}% ({score}pt) WIN record logged immediately")
 
         # ── Normal scanner picks: PnL-based alerts ───────────────────────
         else:
@@ -246,6 +308,58 @@ def check_price_alerts() -> None:
     _save_state(state)
 
 
+# ── Custom price targets (spam alert) ─────────────────────────────────────
+
+# Each entry: (cp_coin_id, symbol, target_pct, baseline_price)
+# baseline_price = price at time of setup; alert fires when current >= baseline * (1 + target_pct/100)
+_SPAM_ALERTS: list[tuple[str, str, float, float]] = [
+    ("dydx-dydx", "dYdX", 30.0, 0.135908),  # baseline $0.135908 on 2026-04-17
+]
+_SPAM_COUNT = 50  # number of messages to send
+
+
+def check_spam_alerts(state: dict) -> None:
+    """
+    Check custom price targets and spam `_SPAM_COUNT` Telegram messages if hit.
+    Fires once per alert (stored in state to prevent re-firing).
+    """
+    for cp_id, symbol, target_pct, baseline in _SPAM_ALERTS:
+        key = f"spam_{cp_id}_{target_pct:.0f}"
+        if key in state:
+            continue  # already fired
+
+        try:
+            import httpx as _httpx
+            r = _httpx.get(
+                f"https://api.coinpaprika.com/v1/tickers/{cp_id}",
+                params={"quotes": "USD"},
+                timeout=12,
+            ).json()
+            price = r["quotes"]["USD"]["price"]
+        except Exception as e:
+            print(f"  [alerts] {symbol} price fetch failed: {e}")
+            continue
+
+        target_price = baseline * (1 + target_pct / 100)
+        pnl = (price - baseline) / baseline * 100
+        print(f"  [alerts] {symbol}: ${price:.6f} (baseline ${baseline:.6f}, target ${target_price:.6f}, now {pnl:+.1f}%)")
+
+        if price >= target_price:
+            print(f"  [alerts] 🚨 {symbol} +{target_pct:.0f}% HIT — spamming {_SPAM_COUNT} messages...")
+            from src.utils.telegram import send_telegram
+            for i in range(1, _SPAM_COUNT + 1):
+                try:
+                    send_telegram(
+                        f"🚨🚨🚨 <b>dYdX +{target_pct:.0f}% HIT!</b> 🚨🚨🚨\n"
+                        f"Price: ${price:.6f}  (was ${baseline:.6f})\n"
+                        f"[{i}/{_SPAM_COUNT}] WAKE UP!!!"
+                    )
+                except Exception:
+                    pass
+            state[key] = True
+            print(f"  [alerts] spam done — {_SPAM_COUNT} messages sent for {symbol}")
+
+
 # ── Loop mode ─────────────────────────────────────────────────────────────
 
 def run_alert_loop(interval_minutes: int = 15) -> None:
@@ -259,6 +373,12 @@ def run_alert_loop(interval_minutes: int = 15) -> None:
             check_price_alerts()
         except Exception as e:
             print(f"  [alerts] check failed: {e}")
+        try:
+            _state = _load_state()
+            check_spam_alerts(_state)
+            _save_state(_state)
+        except Exception as e:
+            print(f"  [alerts] spam check failed: {e}")
         time.sleep(interval_minutes * 60)
 
 

@@ -1005,6 +1005,7 @@ def update_open_positions() -> None:
 
             # Time-based expiry (Bug 6): close when max_hold_hours elapsed
             _wr_expired = False
+            _hrs_open   = 0.0
             try:
                 _entry_dt = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                 _hrs_open = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
@@ -1014,11 +1015,12 @@ def update_open_positions() -> None:
             except Exception:
                 pass
 
-            # Milestone logging — Scores: +25%=1pt, +50%=2pt, +100%=3pt, +200%=4pt
+            # Milestone logging — each level creates its own WIN record; position stays open
             _milestone_flags = {
                 25:  ("[MILESTONE_25]",  1),
                 50:  ("[MILESTONE_50]",  2),
                 100: ("[MILESTONE_100]", 3),
+                150: ("[MILESTONE_150]", 3),
                 200: ("[MILESTONE_200]", 4),
             }
             for _pct, (_flag, _score) in sorted(_milestone_flags.items()):
@@ -1028,8 +1030,6 @@ def update_open_positions() -> None:
                     _icon = "🌙" if _pct >= 200 else "🚀"
                     print(f"  {_icon} WHALE_RIDE MILESTONE: {row['coin']} hit +{_pct}% ({_score}pt) (current: {pnl_pct:+.1f}%)")
                     new_wins.append({**row, "_milestone": _pct, "_milestone_only": True})
-                    if _pct != 25:
-                        continue
                     _ms_record = {
                         "date":          row.get("date", ""),
                         "type":          "WHALE_MILESTONE",
@@ -1039,7 +1039,7 @@ def update_open_positions() -> None:
                         "stop_loss":     "",
                         "take_profit":   "",
                         "status":        "WIN",
-                        "exit_price":    round(entry * 1.25, 8),  # Bug 3: price at exact +25%, not current
+                        "exit_price":    round(entry * (1 + _pct / 100), 8),
                         "close_date":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
                         "pnl_pct":       float(_pct),
                         "current_price": row.get("current_price", ""),
@@ -1051,7 +1051,15 @@ def update_open_positions() -> None:
                         "qualifier":     "WHALE_RIDE",
                         "key_signal":    "",
                     }
-                    rows.append(_ms_record)
+                    _already = any(
+                        r.get("type") == "WHALE_MILESTONE"
+                        and r.get("coin", "").upper() == _ms_record["coin"].upper()
+                        and r.get("date", "") == _ms_record["date"]
+                        and str(r.get("pnl_pct", "")) == str(_ms_record["pnl_pct"])
+                        for r in rows
+                    )
+                    if not _already:
+                        rows.append(_ms_record)
 
             # Close conditions (in priority order)
             if tp > 0 and usd >= tp:
@@ -1083,6 +1091,16 @@ def update_open_positions() -> None:
                 closed += 1
                 print(f"  ⏰ WHALE_RIDE EXPIRED: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_expire_status}")
                 if _expire_status == "WIN":
+                    new_wins.append(row)
+            elif _hrs_open > 72 and pnl_pct < 10.0:
+                # Stale position: open >72h with less than +10% gain — no longer worth holding
+                _stale_status = "WIN" if pnl_pct > 0 else "LOSS"
+                row["status"]     = _stale_status
+                row["exit_price"] = round(usd, 6)
+                row["close_date"] = _now_str
+                closed += 1
+                print(f"  ⏰ WHALE_RIDE STALE: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_stale_status}")
+                if _stale_status == "WIN":
                     new_wins.append(row)
             continue
 
