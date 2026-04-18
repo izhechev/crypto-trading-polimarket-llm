@@ -633,7 +633,28 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
     Skips if this coin is already logged as SCANNER (never mix categories).
     """
     rows = _read()
-    coin = wr.get("symbol", "").upper()
+    coin   = wr.get("symbol", "").upper()
+    cp_id  = wr.get("coin_id", "")
+    mcap   = wr.get("market_cap", 0) or 0
+    entry  = wr.get("entry", 0) or 0
+
+    # Bug 5a: skip generic/ambiguous symbols (too short = price collision risk)
+    if len(coin) <= 2:
+        print(f"  Skipped WHALE_RIDE — {coin}: symbol too short (collision risk)")
+        return
+
+    # Bug 5b: skip micro-cap coins (< $10M mcap)
+    if 0 < mcap < 10_000_000:
+        print(f"  Skipped WHALE_RIDE — {coin}: mcap ${mcap/1e6:.1f}M < $10M")
+        return
+
+    # Bug 5c: skip zero or sub-satoshi entries (untrackable precision)
+    if entry <= 0:
+        print(f"  Skipped WHALE_RIDE — {coin}: entry price is zero")
+        return
+    if entry < 0.000001:
+        print(f"  Skipped WHALE_RIDE — {coin}: entry ${entry:.2e} too small to track reliably")
+        return
 
     from datetime import timedelta
     _7d_ago = datetime.now(timezone.utc) - timedelta(days=7)
@@ -645,10 +666,12 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
         except Exception:
             return datetime.min.replace(tzinfo=timezone.utc)
 
+    # Bug 4: dedup by symbol OR coin_id (prevents same coin logged twice)
     already_open = any(
         r.get("type") == "WHALE_RIDE"
         and r.get("status") in ("OPEN", "EXCLUDED")
-        and r.get("coin", "").upper() == coin
+        and (r.get("coin", "").upper() == coin
+             or (cp_id and r.get("coin_id", "") == cp_id))
         and _row_date(r) >= _7d_ago
         for r in rows
     )
@@ -760,13 +783,12 @@ def log_whale_rider_alert(c: dict, fear_greed_value: int) -> None:
 
 def close_whale_rider_position(sym: str, current_price: float, exit_reason: str = "") -> None:
     """
-    Whale rider exit signal — does NOT auto-close the position.
-    Whale rides only close when price hits TP (+200%) or the 7-day expiry.
-    This function now just stamps the exit note into reasoning so the alert
-    is recorded, but the position stays OPEN.
+    Whale rider exit signal — closes the position immediately as WIN or LOSS.
+    Called when momentum slows, RSI overbought, or other exit conditions fire.
     """
     rows    = _read()
     changed = False
+    _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     for row in rows:
         if (row.get("type") == "WHALE_RIDE"
@@ -779,13 +801,17 @@ def close_whale_rider_position(sym: str, current_price: float, exit_reason: str 
             except (ValueError, KeyError):
                 pnl_pct = 0.0
 
-            # Stamp exit note but keep OPEN — only TP (+200%) or expiry closes
-            note = f" | EXIT_SIGNAL: {exit_reason}" if exit_reason else " | EXIT_SIGNAL"
-            row["reasoning"]     = row["reasoning"] + note
-            row["current_price"] = round(current_price, 8)
+            status = "WIN" if pnl_pct >= 0 else "LOSS"
+            note   = f" | EXIT_SIGNAL: {exit_reason}" if exit_reason else " | EXIT_SIGNAL"
+            row["status"]        = status
+            row["exit_price"]    = round(current_price, 8)
+            row["close_date"]    = _now_str
             row["pnl_pct"]       = round(pnl_pct, 2)
+            row["current_price"] = round(current_price, 8)
+            row["reasoning"]     = row.get("reasoning", "") + note
             changed = True
-            print(f"  Whale rider exit signal noted → {sym} {pnl_pct:+.1f}% — position stays OPEN until +200% TP"
+            icon = "✅" if status == "WIN" else "❌"
+            print(f"  {icon} Whale rider CLOSED {status} → {sym} {pnl_pct:+.1f}%"
                   + (f" ({exit_reason})" if exit_reason else ""))
             break
 
@@ -878,14 +904,53 @@ def update_open_positions() -> None:
     if not scanner_open:
         return
 
-    from src.connectors.coingecko import fetch_prices
+    # Build lookup maps: coin_id → (usd, eur)
     coin_ids = list({r["coin_id"] for r in scanner_open})
+    usd_map: dict[str, float] = {}
+    eur_map: dict[str, float] = {}
+
+    # Try CoinGecko first (handles legacy CG IDs)
     try:
+        from src.connectors.coingecko import fetch_prices
         price_objs = fetch_prices(coin_ids)
         usd_map = {p.coin_id: p.price_usd for p in price_objs}
         eur_map = {p.coin_id: p.price_eur for p in price_objs}
     except Exception as e:
-        print(f"  Warning: could not fetch prices for tracking: {e}")
+        print(f"  Warning: CoinGecko price fetch failed: {e}")
+
+    # CoinPaprika fallback for any positions not resolved by CoinGecko
+    missing_ids = [cid for cid in coin_ids if cid not in usd_map]
+    if missing_ids:
+        try:
+            from src.connectors.coinpaprika import fetch_tickers_for_scanner
+            tickers = fetch_tickers_for_scanner(limit=1000)
+            # Build symbol→price map and cp_id→price map from CP tickers
+            _cp_sym_usd: dict[str, float] = {}
+            _cp_id_usd:  dict[str, float] = {}
+            for t in tickers:
+                sym = t.get("symbol", "").upper()
+                cid = t.get("_cp_id", "")
+                usd = t.get("current_price") or 0
+                if usd > 0:
+                    _cp_sym_usd[sym] = usd
+                    if cid:
+                        _cp_id_usd[cid] = usd
+            # Match missing positions by coin_id (CP format) or symbol
+            EUR_RATE = 0.92
+            for row in scanner_open:
+                cid = row.get("coin_id", "")
+                if cid in usd_map:
+                    continue  # already resolved
+                sym = row.get("coin", "").upper()
+                usd = _cp_id_usd.get(cid) or _cp_sym_usd.get(sym)
+                if usd:
+                    usd_map[cid] = usd
+                    eur_map[cid] = usd * EUR_RATE
+        except Exception as e2:
+            print(f"  Warning: CoinPaprika fallback failed: {e2}")
+
+    if not usd_map:
+        print("  Warning: could not fetch prices for tracking: all sources failed")
         return
 
     closed    = 0
@@ -907,17 +972,49 @@ def update_open_positions() -> None:
         except (ValueError, KeyError):
             continue
 
+        # Bug 1 — price sanity: if entry is a "real" priced coin (>$1) and fetched
+        # price is <$0.01, the coin_id resolved to a different coin → skip this update.
+        # Also guard against >100× price spike within first 2 hours (bad ID match).
+        if entry > 0:
+            ratio = usd / entry
+            try:
+                _age_hrs = (datetime.now(timezone.utc) -
+                            datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC")
+                            .replace(tzinfo=timezone.utc)).total_seconds() / 3600
+            except Exception:
+                _age_hrs = 999
+            _price_collision = (
+                (entry > 1.0 and usd < 0.01)           # top-coin ID matched micro-coin
+                or (_age_hrs < 2 and (ratio > 50 or ratio < 0.02))  # impossible move in <2h
+            )
+            if _price_collision:
+                print(f"  ⚠️  PRICE COLLISION skipped: {row.get('coin')} "
+                      f"entry=${entry:.6f} fetched=${usd:.6f} (ratio {ratio:.1f}×)")
+                continue
+
         pnl_pct = (usd - entry) / entry * 100
         row["current_price"] = round(usd, 6)
         row["price_eur"]     = round(eur_map.get(row["coin_id"], 0), 6)
         row["pnl_pct"]       = round(pnl_pct, 2)
 
-        # Whale ride: milestone logging — all milestones log WIN records, position stays OPEN
-        # Closes ONLY when TP hit (+200%) or pnl <= -100% (coin worthless). No time expiry.
+        # Whale ride: milestone logging + SL/TP/time-expiry close
         if row_type == "WHALE_RIDE":
             reasoning = row.get("reasoning", "")
             import re as _re
-            # Scores: +25%=1pt, +50%=2pt, +100%=3pt, +200%=4pt
+            _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+            # Time-based expiry (Bug 6): close when max_hold_hours elapsed
+            _wr_expired = False
+            try:
+                _entry_dt = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                _hrs_open = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
+                _m = _re.search(r"max_hold:\s*(\d+)h", reasoning)
+                _max_hold = int(_m.group(1)) if _m else 48
+                _wr_expired = _hrs_open >= _max_hold
+            except Exception:
+                pass
+
+            # Milestone logging — Scores: +25%=1pt, +50%=2pt, +100%=3pt, +200%=4pt
             _milestone_flags = {
                 25:  ("[MILESTONE_25]",  1),
                 50:  ("[MILESTONE_50]",  2),
@@ -931,7 +1028,8 @@ def update_open_positions() -> None:
                     _icon = "🌙" if _pct >= 200 else "🚀"
                     print(f"  {_icon} WHALE_RIDE MILESTONE: {row['coin']} hit +{_pct}% ({_score}pt) (current: {pnl_pct:+.1f}%)")
                     new_wins.append({**row, "_milestone": _pct, "_milestone_only": True})
-                    # All milestones (+25%, +50%, +100%, +200%) → log a WIN record
+                    if _pct != 25:
+                        continue
                     _ms_record = {
                         "date":          row.get("date", ""),
                         "type":          "WHALE_MILESTONE",
@@ -941,7 +1039,7 @@ def update_open_positions() -> None:
                         "stop_loss":     "",
                         "take_profit":   "",
                         "status":        "WIN",
-                        "exit_price":    round(entry * (1 + _pct / 100), 8),
+                        "exit_price":    round(entry * 1.25, 8),  # Bug 3: price at exact +25%, not current
                         "close_date":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
                         "pnl_pct":       float(_pct),
                         "current_price": row.get("current_price", ""),
@@ -955,8 +1053,7 @@ def update_open_positions() -> None:
                     }
                     rows.append(_ms_record)
 
-            # Close only at TP (+200%) — no SL, no time expiry
-            _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            # Close conditions (in priority order)
             if tp > 0 and usd >= tp:
                 row["status"]     = "WIN"
                 row["exit_price"] = round(usd, 6)
@@ -964,13 +1061,29 @@ def update_open_positions() -> None:
                 closed += 1
                 new_wins.append(row)
                 print(f"  🌙 WHALE_RIDE TP HIT: {row['coin']} +200% → closed WIN")
+            elif sl > 0 and usd <= sl:
+                # Bug 2: honour SL for whale rides
+                row["status"]     = "LOSS"
+                row["exit_price"] = round(usd, 6)
+                row["close_date"] = _now_str
+                closed += 1
+                print(f"  🛑 WHALE_RIDE SL HIT: {row['coin']} {pnl_pct:+.1f}% (entry ${entry:.6f} → ${usd:.6f} ≤ SL ${sl:.6f})")
             elif pnl_pct <= -99.9:
-                # Coin essentially worthless — close as LOSS
                 row["status"]     = "LOSS"
                 row["exit_price"] = round(usd, 6)
                 row["close_date"] = _now_str
                 closed += 1
                 print(f"  WHALE_RIDE {row['coin']} worthless → LOSS {pnl_pct:+.1f}%")
+            elif _wr_expired:
+                # Bug 6: time limit expired → close WIN if profitable, LOSS otherwise
+                _expire_status = "WIN" if pnl_pct > 0 else "LOSS"
+                row["status"]     = _expire_status
+                row["exit_price"] = round(usd, 6)
+                row["close_date"] = _now_str
+                closed += 1
+                print(f"  ⏰ WHALE_RIDE EXPIRED: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_expire_status}")
+                if _expire_status == "WIN":
+                    new_wins.append(row)
             continue
 
         _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1316,7 +1429,7 @@ def print_track_record() -> None:
     # ── 1. PORTFOLIO ──────────────────────────────────────────────────────
     portfolio_rows = [r for r in rows if r.get("type") == "PORTFOLIO"]
     print(f"\n  {'─'*_W}")
-    print(f"  PORTFOLIO  (Kraken live / portfolio.json fallback)")
+    print(f"  PORTFOLIO  (portfolio.json)")
     print(f"  {'─'*_W}")
 
     if portfolio_rows:
@@ -1662,7 +1775,7 @@ def print_track_record() -> None:
                     pass
 
         if milestone_rows:
-            ms_sorted = sorted(milestone_rows, key=lambda x: x.get("close_date") or x.get("date",""), reverse=True)[:20]
+            ms_sorted = sorted(milestone_rows, key=lambda x: x.get("close_date") or x.get("date",""), reverse=True)
             print(f"\n  MILESTONE WINS  ({len(milestone_rows)} partial wins — positions still open):")
             for r in ms_sorted:
                 try:

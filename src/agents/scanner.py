@@ -8,8 +8,39 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import config
-from src.connectors.coingecko import fetch_ohlcv
+from src.connectors.coingecko import fetch_ohlcv as _cg_fetch_ohlcv
+from src.connectors.coinpaprika import (
+    fetch_tickers_for_scanner as _cp_fetch_tickers,
+    fetch_ohlcv as _cp_fetch_ohlcv,
+    _build_cg_id_map as _cp_build_cg_id_map,
+)
 from src.agents.technical_analyst import compute_ta
+
+
+def fetch_ohlcv(coin_id: str, days: int = 30) -> list[dict]:
+    """Backwards-compat shim used by callers outside scanner.py."""
+    return _cg_fetch_ohlcv(coin_id, days)
+
+
+def _fetch_ohlcv_for_coin(coin: dict, days: int = 30) -> list[dict]:
+    """
+    Fetch OHLCV for TA.  CoinPaprika historical OHLCV requires a paid plan on
+    free tier — always try CP first (fast fail) then fall back to CoinGecko.
+    For CP coins without a known CG ID, look it up from the dynamic map.
+    """
+    if coin.get("_cp_id"):
+        data = _cp_fetch_ohlcv(coin["_cp_id"], days)
+        if data and len(data) >= 20:
+            return data
+        # CP returned too few candles (free-tier limit) — fall back to CoinGecko
+        cg_id = coin.get("_cg_id", "")
+        if not cg_id:
+            sym = coin.get("symbol", "").upper()
+            cg_id = _cp_build_cg_id_map().get(sym, "")
+        if cg_id:
+            return _cg_fetch_ohlcv(cg_id, days)
+        return []
+    return _cg_fetch_ohlcv(coin["id"], days)
 
 STABLECOINS = {
     "USDT", "USDC", "DAI", "BUSD", "TUSD", "USDD", "FDUSD", "PYUSD",
@@ -189,40 +220,6 @@ _COIN_ALIASES: dict[str, list[str]] = {
     "ZEC":   ["Zcash"],
 }
 
-# Kraken uses non-standard tickers for a few coins
-_KRAKEN_REMAP = {"XBT": "BTC", "XDG": "DOGE"}
-
-
-def _get_kraken_symbols() -> set[str]:
-    """Fetch available base currencies from Kraken public API (no auth needed)."""
-    try:
-        url = "https://api.kraken.com/0/public/AssetPairs"
-        with httpx.Client(timeout=15) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-
-        bases = set()
-        for pair in data.get("result", {}).values():
-            wsname = pair.get("wsname", "")
-            if "/" in wsname:
-                base = wsname.split("/")[0]
-                base = _KRAKEN_REMAP.get(base, base)
-                bases.add(base.upper())
-        return bases
-    except Exception as e:
-        print(f"  Warning: Kraken API failed ({e}), using fallback list")
-        return {
-            "BTC", "ETH", "SOL", "ADA", "DOT", "LINK", "AVAX", "ATOM", "XRP",
-            "LTC", "BCH", "UNI", "AAVE", "MKR", "COMP", "YFI", "GRT", "FIL",
-            "EOS", "XTZ", "ALGO", "XLM", "TRX", "VET", "ETC", "XMR", "ZEC",
-            "DASH", "MANA", "SAND", "AXS", "FLOW", "CHZ", "ENJ", "LRC", "STORJ",
-            "OCEAN", "KAVA", "CRV", "1INCH", "SUSHI", "SNX", "ZRX", "BAT",
-            "MATIC", "NEAR", "FTM", "HBAR", "ICP", "EGLD", "THETA", "KSM",
-            "RUNE", "INJ", "OP", "ARB", "SUI", "APT", "TIA", "SEI", "PYTH",
-            "WIF", "BONK", "PEPE", "RENDER", "STX", "IMX", "BLUR", "ENS",
-        }
-
 
 def _get_binance_symbols() -> set[str]:
     """Fetch available base currencies from Binance (USDT pairs)."""
@@ -250,12 +247,44 @@ def _get_revolut_symbols() -> set[str]:
     return set(config.REVOLUT_X_COINS)
 
 
-def _fetch_top_250(pages: int = 1) -> list[dict]:
-    """Fetch top coins by market cap from CoinGecko /coins/markets.
+def _get_kraken_symbols() -> set[str]:
+    """Fetch base currencies from Kraken public AssetPairs endpoint."""
+    try:
+        import httpx as _httpx
+        with _httpx.Client(timeout=10) as _c:
+            r = _c.get("https://api.kraken.com/0/public/AssetPairs",
+                       params={"info": "leverage"})
+        if r.status_code == 200:
+            data = r.json().get("result", {})
+            syms: set[str] = set()
+            for pair_info in data.values():
+                base = (pair_info.get("base") or "").upper()
+                # Kraken prefixes with X/Z for legacy pairs; strip them
+                if len(base) > 3 and base[0] in ("X", "Z"):
+                    base = base[1:]
+                if base and base not in ("ZUSD", "ZEUR", "ZGBP", "ZJPY"):
+                    syms.add(base)
+            return syms
+    except Exception:
+        pass
+    # Fallback: known Kraken-listed assets
+    return {
+        "BTC", "ETH", "SOL", "XRP", "ADA", "DOT", "LINK", "AVAX", "ATOM",
+        "LTC", "BCH", "UNI", "AAVE", "MKR", "GRT", "CRV", "SNX", "FIL",
+        "INJ", "NEAR", "OP", "ARB", "SUI", "APT", "TIA", "PEPE", "DOGE",
+        "SHIB", "MATIC", "FTM", "ALGO", "XLM", "TRX", "ETC", "AXS", "FET",
+        "WIF", "BONK", "JUP", "PENDLE", "ICP", "HBAR", "VET", "RUNE", "ENA",
+        "IMX", "COMP", "BAT", "ZEC", "DASH", "XMR", "OCEAN", "AGIX",
+    }
 
-    pages=1  → top 250  (default, all-exchange scan)
-    pages=4  → top 1000 (Kraken scan — more candidates after exchange filter)
-    """
+
+def _fetch_top_coinpaprika(limit: int = 1000) -> list[dict]:
+    """Fetch top coins from CoinPaprika (primary source). Single request, no pagination."""
+    return _cp_fetch_tickers(limit=limit)
+
+
+def _fetch_top_250_coingecko(pages: int = 1) -> list[dict]:
+    """Fetch top coins from CoinGecko (fallback). pages=1→250, pages=4→1000."""
     url = "https://api.coingecko.com/api/v3/coins/markets"
     headers = {}
     if config.COINGECKO_API_KEY:
@@ -277,10 +306,15 @@ def _fetch_top_250(pages: int = 1) -> list[dict]:
             batch = resp.json()
             all_coins.extend(batch)
             if len(batch) < 250:
-                break  # last page returned fewer than requested — we're done
+                break
             if page < pages:
-                time.sleep(1.2)  # stay within CoinGecko free-tier rate limit
+                time.sleep(1.2)
     return all_coins
+
+
+def _fetch_top_250(pages: int = 1) -> list[dict]:
+    """Backwards-compat alias — uses CoinGecko directly (used by non-scanner callers)."""
+    return _fetch_top_250_coingecko(pages)
 
 
 def _check_rug_pull(coin: dict) -> tuple[bool, str]:
@@ -984,6 +1018,7 @@ def _build_whale_ride(coin: dict, crash_reason: str, prev_trades: list[dict]) ->
         "prev_wins":      prev_wins,
         "change_24h":     coin.get("price_change_percentage_24h") or 0,
         "change_7d":      coin.get("price_change_percentage_7d_in_currency") or 0,
+        "market_cap":     coin.get("market_cap") or 0,
     }
 
 
@@ -1061,23 +1096,22 @@ def run_smart_scanner(
     exchange: str | None = None,
     fear_greed: dict | None = None,
     open_count: int = 0,
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], int, dict]:
     """
     Fetch top coins, exclude stablecoins/wrapped tokens, optionally filter
     by exchange, score by TA opportunity.
 
-    Returns (top10, pump_alerts, whale_rides).
-    exchange:    None (no filter) | "kraken" | "revolut" | "both"
+    Returns (top10, pump_alerts, whale_rides, quality_count, catalysts).
+    exchange:    None (no filter) | "revolut" | "binance" | "all"
     fear_greed:  dict with "value" (0-100) and "label" — used for macro filter
-
-    Fetches top 1000 when exchange=kraken (4 pages) to maximise candidates
-    after exchange filter; all other modes fetch top 250 (1 page).
     """
     label    = exchange.upper() if exchange else "ALL EXCHANGES"
     fg_value = (fear_greed or {}).get("value", 50)   # 0-100; used for macro gates below
-    # Always fetch 1000 coins — strict TA + gate filters remove most, need a large pool
+    # Fetch 3000 coins — CP sorts strictly by market cap, pump coins can sit at rank 1001-3000
+    # while CoinGecko ranked them higher due to activity weighting. TA loop only touches top 60
+    # candidates (quick_score cap), so the extra coins add zero TA overhead.
     _pages = 4
-    _top_n = 1000
+    _top_n = 3000
     print("\n" + "=" * 60)
     print(f"  SMART SCANNER — Top {_top_n} Coins [{label}]")
     print("=" * 60)
@@ -1086,20 +1120,14 @@ def run_smart_scanner(
     allowed: set[str] | None = None
     if exchange:
         ex = exchange.lower()
-        if ex == "kraken":
-            print("\n  Fetching Kraken tradeable pairs...")
-            allowed = _get_kraken_symbols()
-        elif ex == "binance":
+        if ex == "binance":
             print("\n  Fetching Binance tradeable pairs...")
             allowed = _get_binance_symbols()
         elif ex == "revolut":
             allowed = _get_revolut_symbols()
-        elif ex == "both":
-            print("\n  Fetching Kraken tradeable pairs...")
-            allowed = _get_kraken_symbols() | _get_revolut_symbols()
         elif ex == "all":
             print("\n  Fetching all exchange pairs...")
-            allowed = _get_kraken_symbols() | _get_revolut_symbols() | _get_binance_symbols()
+            allowed = _get_revolut_symbols() | _get_binance_symbols()
         if allowed is not None:
             print(f"  {len(allowed)} unique base assets on {label}")
 
@@ -1113,14 +1141,30 @@ def run_smart_scanner(
     except Exception:
         pass
 
-    # 2. Top coins market data (250 default, 1000 for Kraken)
-    print(f"  Fetching top {_top_n} from CoinGecko ({_pages} page{'s' if _pages > 1 else ''})...")
+    # 2. Top coins market data — CoinPaprika (primary, single free request), CoinGecko fallback
+    _cp_ok = False
+    coins: list[dict] = []
+    print(f"  Fetching top {_top_n} from CoinPaprika (primary)...")
     try:
-        coins = _fetch_top_250(pages=_pages)
+        coins = _fetch_top_coinpaprika(limit=_top_n)
+        if coins:
+            _cp_ok = True
+            print(f"  Got {len(coins)} coins from CoinPaprika")
     except Exception as e:
-        print(f"  ERROR: {e}")
-        return [], []
-    print(f"  Got {len(coins)} coins")
+        print(f"  CoinPaprika failed: {e} — falling back to CoinGecko")
+
+    if not coins:
+        print(f"  Fetching top 1000 from CoinGecko ({_pages} page{'s' if _pages > 1 else ''})...")
+        try:
+            coins = _fetch_top_250_coingecko(pages=_pages)
+            print(f"  Got {len(coins)} coins from CoinGecko")
+        except Exception as e:
+            print(f"  ERROR: CoinGecko also failed: {e}")
+            return [], [], [], 0, {}
+
+    if not coins:
+        print("  ERROR: no coin data from any source")
+        return [], [], [], 0, {}
 
     # 3. Filter out stablecoins, wrapped tokens, tokenized stocks, wash traders, and permanently excluded
     excluded = STABLECOINS | WRAPPED_TOKENS | TOKENIZED_STOCKS | WASH_TRADING_CONFIRMED | PERMANENTLY_EXCLUDED
@@ -1204,28 +1248,18 @@ def run_smart_scanner(
     pump_coins = raw_pump_coins
 
     # 4d. Exclude coins already in the user's portfolio (no point recommending what's owned)
-    # Try Kraken live first, fall back to portfolio.json
     portfolio_in_scan = 0   # count of held coins that appear in the scan universe
     portfolio_symbols: set[str] = set()
     try:
-        from src.connectors.kraken import fetch_kraken_portfolio
-        kraken_holdings, kraken_src = fetch_kraken_portfolio()
-        if kraken_holdings:
-            portfolio_symbols = {h["asset"].upper() for h in kraken_holdings}
-            print(f"  Portfolio exclusion from {kraken_src}: {', '.join(sorted(portfolio_symbols))}")
+        with open(config.PORTFOLIO_PATH) as _pf:
+            portfolio_symbols = {
+                h["asset"].upper()
+                for h in json.load(_pf).get("holdings", [])
+            }
+        if portfolio_symbols:
+            print(f"  Portfolio exclusion from portfolio.json: {', '.join(sorted(portfolio_symbols))}")
     except Exception:
         pass
-    if not portfolio_symbols:
-        try:
-            with open(config.PORTFOLIO_PATH) as _pf:
-                portfolio_symbols = {
-                    h["asset"].upper()
-                    for h in json.load(_pf).get("holdings", [])
-                }
-            if portfolio_symbols:
-                print(f"  Portfolio exclusion from portfolio.json: {', '.join(sorted(portfolio_symbols))}")
-        except Exception:
-            pass
     if portfolio_symbols:
         pre_pf = len(exchange_coins)
         exchange_coins = [
@@ -1238,7 +1272,7 @@ def run_smart_scanner(
             print(f"  🚫 {excluded_pf} portfolio coin(s) excluded")
 
     # 4d-2. Also exclude coins with OPEN scanner recommendations.
-    # Kraken/portfolio.json only tracks actual held coins; recommendations.csv tracks
+    # portfolio.json only tracks actual held coins; recommendations.csv tracks
     # bot-logged entries. Without this, a coin like ARB can appear as a "new" pick
     # even while it already has an OPEN recommendation.
     _open_scanner_syms:  set[str] = set()  # used later to guard whale_rides building
@@ -1373,7 +1407,7 @@ def run_smart_scanner(
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
         try:
-            ohlcv = fetch_ohlcv(coin_id, days=30)
+            ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
             if not ohlcv or len(ohlcv) < 20:
                 continue
 
@@ -1649,7 +1683,7 @@ def run_smart_scanner(
         except Exception:
             pass
 
-        time.sleep(2)  # Stay within CoinGecko rate limits (~30/min)
+        time.sleep(0.11 if _cp_ok else 2)  # CP: 10 req/sec; CG: ~30 req/min
         if (i + 1) % 10 == 0:
             print(f"    {i+1}/{len(candidates)} done...")
 

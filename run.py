@@ -5,16 +5,13 @@ Usage:
   python run.py                              # prices, F&G, TA, portfolio
   python run.py --scan                       # crypto + stocks + Polymarket (full)
   python run.py --crypto                     # crypto scanner only
-  python run.py --crypto --exchange kraken   # crypto, Kraken-listed coins only
   python run.py --crypto --exchange revolut  # crypto, Revolut X only
   python run.py --crypto --exchange binance  # crypto, Binance only
-  python run.py --crypto --exchange both     # crypto, Kraken + Revolut X
-  python run.py --crypto --exchange all      # crypto, all exchanges
+  python run.py --crypto --exchange all      # crypto, Revolut + Binance
   python run.py --polymarket                 # Polymarket advisor only
   python run.py --stocks                     # stock scanner only
   python run.py --news                       # quick news check for open stock positions
   python run.py --schedule                   # run every 4 h (Groq + Telegram)
-  python run.py --schedule --exchange kraken
   python run.py --scan --debate              # full scan + Bull/Bear debate
 """
 import argparse
@@ -185,62 +182,71 @@ _WHALE_COINS_TTL: int = 3600  # 1 hour — top-1000 list doesn't change every 15
 
 def _fetch_coins_whale(pages: int = 3) -> list[dict]:
     """
-    Fetch up to pages×250 coins from CoinGecko for whale detection.
-    pages=3 → 750 coins.  pages=4 → 1,000 coins.
-    Cached for 1 hour — top-1000 ranking is stable between checks.
-    Paces requests at 1 s apart to stay within rate limits.
+    Fetch top coins for whale detection.
+    Primary: CoinPaprika (single free request, 1000 coins).
+    Fallback: CoinGecko (pages×250, rate-limited).
+    Cached for 1 hour.
     """
     import time as _time
-    import httpx
-    import config as _cfg
-    from src.connectors.coingecko import get_cg_call_count  # noqa: used indirectly via _cg_get
 
     global _whale_coins_cache, _whale_coins_ts
 
     age = _time.time() - _whale_coins_ts
     if _whale_coins_cache and age < _WHALE_COINS_TTL:
-        print(f"  [CG cache] whale coins: using cached data ({age/60:.0f}min old, "
+        print(f"  [CP cache] whale coins: using cached data ({age/60:.0f}min old, "
               f"refreshes in {(_WHALE_COINS_TTL - age)/60:.0f}min)")
         return _whale_coins_cache
 
+    # Try CoinPaprika first
     all_coins: list[dict] = []
-    headers = {}
-    if _cfg.COINGECKO_API_KEY:
-        headers["x-cg-demo-api-key"] = _cfg.COINGECKO_API_KEY
+    try:
+        from src.connectors.coinpaprika import fetch_tickers_for_scanner as _cp_tickers
+        all_coins = _cp_tickers(limit=1000)
+        if all_coins:
+            print(f"  [CP] whale coins: fetched {len(all_coins)} coins from CoinPaprika")
+    except Exception as e:
+        print(f"  ⚠️  CoinPaprika whale fetch failed: {e} — falling back to CoinGecko")
 
-    for page in range(1, pages + 1):
-        try:
-            with httpx.Client(timeout=30) as client:
-                # Count against CG quota
+    # CoinGecko fallback
+    if not all_coins:
+        import httpx
+        import config as _cfg
+        headers = {}
+        if _cfg.COINGECKO_API_KEY:
+            headers["x-cg-demo-api-key"] = _cfg.COINGECKO_API_KEY
+        for page in range(1, pages + 1):
+            try:
                 from src.connectors.coingecko import _cg_get
-                resp = _cg_get(
-                    client,
-                    "https://api.coingecko.com/api/v3/coins/markets",
-                    params={
-                        "vs_currency":            "usd",
-                        "order":                  "market_cap_desc",
-                        "per_page":               250,
-                        "page":                   page,
-                        "price_change_percentage": "24h,7d",
-                        "sparkline":              "false",
-                    },
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                batch = resp.json()
-                if not batch:
-                    break
-                all_coins.extend(batch)
-        except Exception as e:
-            print(f"  ⚠️  CoinGecko page {page} failed: {e}")
-            break
-        if page < pages:
-            _time.sleep(1.2)   # pace: ~0.8 req/s, well within 30 req/min limit
+                with httpx.Client(timeout=30) as client:
+                    resp = _cg_get(
+                        client,
+                        "https://api.coingecko.com/api/v3/coins/markets",
+                        params={
+                            "vs_currency":            "usd",
+                            "order":                  "market_cap_desc",
+                            "per_page":               250,
+                            "page":                   page,
+                            "price_change_percentage": "24h,7d",
+                            "sparkline":              "false",
+                        },
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    batch = resp.json()
+                    if not batch:
+                        break
+                    all_coins.extend(batch)
+            except Exception as e:
+                print(f"  ⚠️  CoinGecko page {page} failed: {e}")
+                break
+            if page < pages:
+                _time.sleep(1.2)
+        if all_coins:
+            print(f"  [CG] whale coins: fetched {len(all_coins)} coins from CoinGecko")
 
     if all_coins:
         _whale_coins_cache = all_coins
         _whale_coins_ts    = _time.time()
-        print(f"  [CG cache] whale coins: fetched {len(all_coins)} coins, cached for 60min")
 
     return all_coins
 
@@ -1060,7 +1066,7 @@ def main():
     parser.add_argument("--tavily-status",    action="store_true", help="Show Tavily AI monthly credit usage")
     parser.add_argument(
         "--exchange",
-        choices=["kraken", "revolut", "binance", "both", "all"],
+        choices=["revolut", "binance", "all"],
         default=None,
         help="Filter to coins available on a specific exchange",
     )
@@ -1196,7 +1202,7 @@ def main():
         print(f"  🪙  python run.py --crypto                   crypto scanner only")
         print(f"  🔮  python run.py --polymarket               Polymarket advisor only")
         print(f"  📊  python run.py --stocks                   stock scanner only")
-        print(f"  🔑  python run.py --crypto --exchange kraken Kraken-only coin filter")
+        print(f"  🔑  python run.py --crypto --exchange revolut Revolut-only coin filter")
         print(f"  🥊  python run.py --scan --debate            + Bull/Bear agent debate")
         print(f"  ⏱   python run.py --schedule                 auto-scan every 4h + Telegram")
         print(f"  🖥   streamlit run dashboard.py               → http://localhost:8501")
