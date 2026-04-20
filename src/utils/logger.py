@@ -1061,6 +1061,16 @@ def update_open_positions() -> None:
                     if not _already:
                         rows.append(_ms_record)
 
+            # Pre-milestone hard SL at -15%: if +25% was never hit, cap the loss
+            _is_principal_recovered = "PRINCIPAL_RECOVERED" in reasoning
+            if not _is_principal_recovered and pnl_pct <= -15.0:
+                row["status"]     = "LOSS"
+                row["exit_price"] = round(usd, 6)
+                row["close_date"] = _now_str
+                closed += 1
+                print(f"  🛑 WHALE_RIDE -15% SL: {row['coin']} {pnl_pct:+.1f}% → LOSS (pre-milestone)")
+                continue
+
             # Close conditions (in priority order)
             if tp > 0 and usd >= tp:
                 row["status"]     = "WIN"
