@@ -99,41 +99,55 @@ def _write_csv(rows: list[dict]) -> None:
 def _fetch_prices_usd(coin_ids: list[str]) -> dict[str, float]:
     """
     Fetch current USD prices keyed by coin_id.
-    Tries CoinGecko first (handles CG-format IDs like 'solana').
-    For IDs not resolved, tries CoinPaprika by exact _cp_id match — never by symbol.
+    1. CoinGecko /simple/price  (lightweight, handles CG-format IDs like 'solana')
+    2. For IDs not resolved: individual CoinPaprika /tickers/{id} calls (free tier, no bulk)
     """
     if not coin_ids:
         return {}
 
     result: dict[str, float] = {}
 
-    # CoinGecko first
+    # 1. CoinGecko /simple/price — much lighter than /coins/markets, higher rate limit
     try:
-        from src.connectors.coingecko import fetch_prices
-        price_objs = fetch_prices(coin_ids)
-        for p in price_objs:
-            result[p.coin_id] = p.price_usd
+        import httpx as _httpx
+        from src.connectors.coingecko import _headers as _cg_headers
+        resp = _httpx.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": ",".join(coin_ids), "vs_currencies": "usd"},
+            headers=_cg_headers(),
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            for cid, data in resp.json().items():
+                usd = data.get("usd")
+                if usd:
+                    result[cid] = float(usd)
+        else:
+            print(f"  [alerts] CoinGecko simple/price HTTP {resp.status_code}")
     except Exception as e:
-        print(f"  [alerts] CoinGecko price fetch failed: {e} — trying CoinPaprika")
+        print(f"  [alerts] CoinGecko price fetch failed: {e}")
 
     missing = [cid for cid in coin_ids if cid not in result]
     if not missing:
         return result
 
-    # CoinPaprika fallback: match by exact _cp_id, never by symbol
-    try:
-        from src.connectors.coinpaprika import fetch_tickers_for_scanner
-        tickers = fetch_tickers_for_scanner(limit=1000)
-        cp_id_price = {
-            c["_cp_id"]: c["current_price"]
-            for c in tickers
-            if c.get("_cp_id") and c.get("current_price")
-        }
-        for cid in missing:
-            if cid in cp_id_price:
-                result[cid] = cp_id_price[cid]
-    except Exception as e2:
-        print(f"  [alerts] CoinPaprika price fetch failed: {e2}")
+    # 2. Individual CoinPaprika /tickers/{id} calls (free on all plans, no bulk needed)
+    import httpx as _httpx
+    import time as _time
+    for cid in missing:
+        try:
+            r = _httpx.get(
+                f"https://api.coinpaprika.com/v1/tickers/{cid}",
+                params={"quotes": "USD"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                price = r.json().get("quotes", {}).get("USD", {}).get("price")
+                if price:
+                    result[cid] = float(price)
+            _time.sleep(0.12)  # stay within 10 req/sec
+        except Exception as e2:
+            print(f"  [alerts] CP ticker {cid} failed: {e2}")
 
     return result
 
@@ -378,12 +392,14 @@ def check_spam_alerts(state: dict) -> None:
 
         try:
             import httpx as _httpx
-            r = _httpx.get(
+            _resp = _httpx.get(
                 f"https://api.coinpaprika.com/v1/tickers/{cp_id}",
                 params={"quotes": "USD"},
                 timeout=12,
-            ).json()
-            price = r["quotes"]["USD"]["price"]
+            )
+            _resp.raise_for_status()
+            _data = _resp.json()
+            price = _data["quotes"]["USD"]["price"]
         except Exception as e:
             print(f"  [alerts] {symbol} price fetch failed: {e}")
             continue
