@@ -1511,6 +1511,7 @@ def print_track_record() -> None:
 
         total_value_eur    = 0.0
         total_cost_eur_est = 0.0
+        total_no_entry_eur = 0.0
 
         for coin, r in sorted(latest.items()):
             try:
@@ -1561,10 +1562,10 @@ def print_track_record() -> None:
                         f"  {pnl_str}{high_str}{low_str}"
                     )
                 else:
-                    total_value_eur += eur_value
+                    total_no_entry_eur += eur_value  # tracked separately, excluded from P&L
                     print(
                         f"    [ ] {coin:8s}  now {_fmt(eur, usd)}"
-                        f"  value €{eur_value:.2f}  (no entry price)"
+                        f"  value €{eur_value:.2f}  (no entry price — excluded from P&L)"
                     )
             except (ValueError, KeyError):
                 pass
@@ -1572,9 +1573,10 @@ def print_track_record() -> None:
         total_pnl_eur = total_value_eur - total_cost_eur_est
         total_pnl_pct = (total_pnl_eur / total_cost_eur_est * 100) if total_cost_eur_est else 0
         icon = "+" if total_pnl_eur >= 0 else "-"
+        no_entry_note = f"  (+€{total_no_entry_eur:.2f} without entry)" if total_no_entry_eur else ""
         print(
             f"\n    [{icon}] TOTAL  invested ≈€{total_cost_eur_est:.2f}"
-            f"  now €{total_value_eur:.2f}  ({total_pnl_pct:+.1f}%)"
+            f"  now €{total_value_eur:.2f}  ({total_pnl_pct:+.1f}%){no_entry_note}"
         )
     else:
         print("    No portfolio data yet — run with --scan to populate.")
