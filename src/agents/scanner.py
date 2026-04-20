@@ -955,7 +955,7 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
                 "coin_id":        coin.get("id", ""),
                 "price":          current,
                 "entry":          current,
-                "stop_loss":      round(current * 0.75, 8),   # -25%
+                "stop_loss":      round(current * 0.85, 8),   # -15% pre-milestone
                 "take_profit":    round(current * 2.00, 8),   # +100%
                 "crash_reason":   f"pump {entry.get('peak_7d', 0):+.0f}% → crash {drop_from_peak*100:.0f}% from peak",
                 "max_hold_hours": 48,
@@ -1849,7 +1849,7 @@ def run_smart_scanner(
             drop = wr.get("drop_from_peak", 0)
             cycles_str = " → ".join(wr["known_cycles"]) if wr["known_cycles"] else "first recorded"
             print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p)}  (crashed {drop:.0f}% from pump peak)")
-            print(f"     Entry: {_pfmt(p)} | SL: {_pfmt(sl)} (-25%) | TP: {_pfmt(tp)} (+100%)")
+            print(f"     Entry: {_pfmt(p)} | SL: {_pfmt(sl)} (-15% pre-milestone) | TP: {_pfmt(tp)} (+100%)")
             print(f"     Max hold: 48h | Max position: €{WHALE_RIDE_MAX_EUR:.0f}")
             print(f"     Pattern: {cycles_str}")
             print(f"     Reason: {wr['crash_reason']}")

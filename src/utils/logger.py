@@ -984,7 +984,7 @@ def update_open_positions() -> None:
             except Exception:
                 _age_hrs = 999
             _price_collision = (
-                (entry > 1.0 and usd < 0.01)           # top-coin ID matched micro-coin
+                (entry > 0 and (ratio < 0.1 or ratio > 10))  # price deviates >90% from entry
                 or (_age_hrs < 2 and (ratio > 50 or ratio < 0.02))  # impossible move in <2h
             )
             if _price_collision:
@@ -1106,20 +1106,21 @@ def update_open_positions() -> None:
 
         _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-        # TIME-BASED FORCE CLOSE: stale position → log as TIME EXIT
-        # Tier 1: age >= 7 days AND pnl < +3%
-        # Tier 2: age > 10 days AND pnl < +5%  (even if pnl is 3-5%)
+        # TIME-BASED FORCE CLOSE: stale position → log as TIME EXIT or LOSS
+        # Tier 1: age >= 7 days AND pnl < +5%  (includes losses — position is going nowhere)
+        # Tier 2: age > 10 days AND pnl < +10% (keep winners running up to 10d)
         try:
             entry_dt  = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
             days_open = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 86400
-            _tier1 = days_open >= 7  and abs(pnl_pct) < 5.0
+            _tier1 = days_open >= 7  and pnl_pct < 5.0
             _tier2 = days_open > 10 and pnl_pct < 10.0
             if _tier1 or _tier2:
-                row["status"]     = "TIME EXIT"
+                _te_status = "LOSS" if pnl_pct < 0 else "TIME EXIT"
+                row["status"]     = _te_status
                 row["exit_price"] = round(usd, 6)
                 row["close_date"] = _now_str
                 closed += 1
-                _reason = "≥7d ±5%" if _tier1 else ">10d <+10%"
+                _reason = "≥7d <+5%" if _tier1 else ">10d <+10%"
                 print(f"  [TIME EXIT] {row['coin']} {pnl_pct:+.1f}% ({days_open:.0f}d) — {_reason}")
                 continue
         except Exception:
@@ -1715,6 +1716,23 @@ def print_track_record() -> None:
                     pass
         wr_avg = sum(wr_pnls) / len(wr_pnls) if wr_pnls else 0
 
+        # Milestone-adjusted win rate: a closed LOSS that hit a milestone
+        # counts as effective WIN (principal was recovered before the drawdown)
+        _ms_coin_dates = {
+            (r.get("coin", "").upper(), r.get("date", ""))
+            for r in milestone_rows
+        }
+        wr_eff_win  = sum(
+            1 for r in whale_rows
+            if r.get("status") in ("WIN", "LOSS")
+            and (
+                r.get("status") == "WIN"
+                or (r.get("coin", "").upper(), r.get("date", "")) in _ms_coin_dates
+            )
+        )
+        wr_eff_loss = wr_closed - wr_eff_win
+        wr_eff_rate = (wr_eff_win / wr_closed * 100) if wr_closed else 0
+
         # Milestone stats (partial wins — separate from full ride closes)
         ms_wins = len(milestone_rows)
         ms_pnls = []
@@ -1730,7 +1748,9 @@ def print_track_record() -> None:
         print(f"  {'─'*_W}")
         print(f"  Open: {wr_open}  Closed: {wr_closed}  (Win: {wr_win}  Loss: {wr_loss})")
         if wr_closed:
-            print(f"  Final close rate: {wr_rate:.0f}%  Avg P&L: {wr_avg:+.1f}%")
+            print(f"  Raw close rate:  {wr_rate:.0f}%  Avg P&L: {wr_avg:+.1f}%")
+            if wr_eff_win != wr_win:
+                print(f"  Milestone-adj rate: {wr_eff_rate:.0f}%  ({wr_eff_win} wins — principal recovered before close)")
         if ms_wins:
             print(f"  Milestones hit: {ms_wins}  Avg milestone P&L: {ms_avg:+.1f}%  (position stays open)")
 

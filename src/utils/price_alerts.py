@@ -217,10 +217,50 @@ def check_price_alerts() -> None:
         key     = _position_key(row)
         fired   = state.setdefault(key, set())
 
-        # ── Whale ride: milestone alerts + immediate WIN record logging ──
+        # ── Whale ride: house-money system ───────────────────────────────
         if row.get("type") == "WHALE_RIDE":
-            _SCORES = {25: 1, 50: 2, 100: 3, 150: 3, 200: 4}
-            for threshold, msg_tmpl in _WHALE_MILESTONES:
+            _SCORES         = {25: 1, 50: 2, 100: 3, 150: 3, 200: 4}
+            reasoning       = row.get("reasoning", "")
+            is_pr           = "PRINCIPAL_RECOVERED" in reasoning
+            _peak_key       = f"{key}_peak"
+
+            # Pre-milestone: hard SL at -15%
+            if not is_pr and pnl_pct <= -15.0 and "pre_sl_fired" not in fired:
+                _alert(f"🛑 {coin} -15% SL at ${usd:.4f} — WHALE_RIDE closed LOSS (pre-milestone)")
+                row["status"]     = "LOSS"
+                row["exit_price"] = str(round(usd, 8))
+                row["close_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                row["pnl_pct"]    = round(pnl_pct, 2)
+                fired.add("pre_sl_fired")
+                dirty_csv = True
+                continue
+
+            # Post-milestone: trailing stop 25% below peak, hard floor at entry
+            if is_pr and "house_closed" not in fired:
+                peak_price  = state.get(_peak_key, entry)
+                if usd > peak_price:
+                    state[_peak_key] = usd
+                    peak_price = usd
+                trailing_sl = max(entry, round(peak_price * 0.75, 8))
+                row["stop_loss"] = str(trailing_sl)
+                dirty_csv = True
+
+                if usd <= trailing_sl:
+                    _close_pct = (trailing_sl - entry) / entry * 100
+                    _alert(
+                        f"🔔 {coin} HOUSE MONEY closed at ${usd:.4f} "
+                        f"(trail SL ${trailing_sl:.4f} = +{_close_pct:.1f}% from entry)"
+                    )
+                    row["status"]     = "WIN"
+                    row["exit_price"] = str(round(usd, 8))
+                    row["close_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    row["pnl_pct"]    = round(pnl_pct, 2)
+                    fired.add("house_closed")
+                    dirty_csv = True
+                    continue
+
+            # Milestone firing LOW→HIGH so +25% fires first and sets PRINCIPAL_RECOVERED
+            for threshold, msg_tmpl in sorted(_WHALE_MILESTONES, key=lambda x: x[0]):
                 label = f"whale_{threshold:.0f}"
                 if pnl_pct >= threshold and label not in fired:
                     msg = msg_tmpl.format(coin=coin, price=usd, pnl=pnl_pct)
@@ -228,17 +268,23 @@ def check_price_alerts() -> None:
                     fired.add(label)
                     dirty_csv = True
 
+                    # +25%: recover principal → set hard-floor SL + tag reasoning
+                    if threshold == 25.0 and not is_pr:
+                        row["reasoning"] = (reasoning + " PRINCIPAL_RECOVERED").strip()
+                        row["stop_loss"] = str(entry)
+                        state[_peak_key] = usd
+                        reasoning = row["reasoning"]
+                        is_pr = True
+
                     pct   = int(threshold)
                     score = _SCORES.get(pct, "")
                     flag  = f"[MILESTONE_{pct}]"
-                    # Stamp the flag into reasoning to prevent double-logging by update_open_positions
                     if flag not in row.get("reasoning", ""):
                         row["reasoning"] = (row.get("reasoning", "") + f" {flag}").strip()
 
-                    # Every milestone creates a WIN record; position stays open
-                    from datetime import datetime, timezone as _tz
+                    # Log WIN record for this milestone
                     try:
-                        _entry_f = float(row.get("entry_price") or 0)
+                        _entry_f  = float(row.get("entry_price") or 0)
                         _ms_price = round(_entry_f * (1 + pct / 100), 8) if _entry_f > 0 else round(usd, 8)
                     except (ValueError, TypeError):
                         _ms_price = round(usd, 8)
@@ -252,7 +298,7 @@ def check_price_alerts() -> None:
                         "take_profit":   "",
                         "status":        "WIN",
                         "exit_price":    _ms_price,
-                        "close_date":    datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                        "close_date":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
                         "pnl_pct":       float(pct),
                         "current_price": round(usd, 8),
                         "price_eur":     "",
@@ -300,9 +346,11 @@ def check_price_alerts() -> None:
         _write_csv(rows)
 
     # Prune state for closed positions (keep it lean)
+    # Keys take two forms: "<coin>|<date>" (fired set) and "<coin>|<date>_peak" (peak tracker)
     open_keys = {_position_key(r) for r in open_rows}
     for k in list(state.keys()):
-        if k not in open_keys:
+        base = k[:-5] if k.endswith("_peak") else k  # strip _peak suffix
+        if base not in open_keys:
             del state[k]
 
     _save_state(state)
