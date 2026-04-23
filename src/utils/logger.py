@@ -1907,6 +1907,7 @@ def print_track_record() -> None:
 
         closed_wr = [r for r in whale_rows if r.get("status") in ("WIN", "LOSS")]
         if closed_wr:
+            import re as _re_wr
             closed_wr_sorted = sorted(closed_wr, key=lambda x: x.get("close_date") or x.get("date", ""), reverse=True)[:20]
             print(f"\n  CLOSED WHALE RIDES  (last {len(closed_wr_sorted)} of {len(closed_wr)}):")
             for r in closed_wr_sorted:
@@ -1919,8 +1920,16 @@ def print_track_record() -> None:
                     date   = (r.get("close_date") or r["date"])[:10]
                     reasoning = r.get("reasoning", "")
                     scam   = " ⚠️" if "SERIAL SCAM" in reasoning else ""
+                    # When principal was recovered via milestone, the final exit PnL
+                    # vs entry is misleading (can be negative while overall trade was +).
+                    # Show the highest milestone hit alongside the exit PnL.
+                    ms_tag = ""
+                    if "PRINCIPAL_RECOVERED" in reasoning:
+                        ms_m = _re_wr.search(r"\[MILESTONE_(\d+)\]", reasoning)
+                        ms_pct = int(ms_m.group(1)) if ms_m else 25
+                        ms_tag = f"  [+{ms_pct}% milestone → house money]"
                     print(
-                        f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
+                        f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%{ms_tag}"
                         f"  entry {_usd_to_eur(entry)} → exit {_usd_to_eur(exit_p)}  ({date}){scam}"
                     )
                 except (ValueError, KeyError):
