@@ -1069,8 +1069,10 @@ def _get_open_positions(current_prices: dict[str, float]) -> list[dict]:
             current = current_prices.get(sym, 0.0)
             pnl_pct = ((current - entry) / entry * 100) if entry > 0 and current > 0 else None
             is_stale = (
-                (age_days >= 7  and (pnl_pct is None or pnl_pct < 3.0))
-                or (age_days > 10 and (pnl_pct is None or pnl_pct < 5.0))
+                pnl_pct is not None and (
+                    (age_days >= 7  and pnl_pct < 3.0)
+                    or (age_days > 10 and pnl_pct < 5.0)
+                )
             )
             is_approaching_tp = pnl_pct is not None and pnl_pct >= 8.0
             is_critical_loss  = pnl_pct is not None and pnl_pct <= -8.0
@@ -1115,6 +1117,9 @@ def run_smart_scanner(
     print("\n" + "=" * 60)
     print(f"  SMART SCANNER — Top {_top_n} Coins [{label}]")
     print("=" * 60)
+
+    from src.connectors.coingecko import get_eur_usd_rate as _get_eur_rate
+    _eur = _get_eur_rate()
 
     # 1. Build allowed symbol set (None = no exchange filter)
     allowed: set[str] | None = None
@@ -1649,11 +1654,13 @@ def run_smart_scanner(
             if deep_dip:
                 print(f"  ⭐ DEEP DIP: {symbol} — 7d {change_7d:.1f}%, RSI {ta.rsi_14:.1f}, MACD bullish")
 
+            _price_usd = coin.get("current_price", 0)
             results.append({
                 "coin_id":         coin_id,
                 "symbol":          symbol,
                 "name":            coin.get("name", ""),
-                "price":           coin.get("current_price", 0),
+                "price":           _price_usd,
+                "price_eur":       coin.get("current_price_eur") or _price_usd * _eur,
                 "change_24h":      coin.get("price_change_percentage_24h") or 0,
                 "change_7d":       change_7d,
                 "market_cap":      coin.get("market_cap") or 0,
@@ -1745,20 +1752,25 @@ def run_smart_scanner(
 
     # 7. Display
     def _pfmt(p: float) -> str:
-        if p >= 1:      return f"${p:,.2f}"
-        if p >= 0.01:   return f"${p:.4f}"
-        if p >= 0.0001: return f"${p:.6f}"
-        return f"${p:.8f}"
+        if p >= 1:      return f"€{p:,.2f}"
+        if p >= 0.01:   return f"€{p:.4f}"
+        if p >= 0.0001: return f"€{p:.6f}"
+        return f"€{p:.8f}"
 
     # ── Stale open position detection ─────────────────────────────────────
     all_coin_prices = {c.get("symbol", "").upper(): c.get("current_price", 0.0) for c in coins}
     open_positions  = _get_open_positions(all_coin_prices)
-    stale_positions = [p for p in open_positions if p["is_stale"]]
+    stale_positions  = [p for p in open_positions if p["is_stale"]]
+    noprice_positions = [p for p in open_positions if p["pnl_pct"] is None and not p["is_stale"]]
     if stale_positions:
         print(f"\n  ⏳  STALE POSITIONS  (≥7d <+3%  or  >10d <+5%)  — TIME EXIT\n" + "-" * 60)
         for p in stale_positions:
-            pnl_str = f"{p['pnl_pct']:+.1f}%" if p["pnl_pct"] is not None else "N/A"
+            pnl_str = f"{p['pnl_pct']:+.1f}%"
             print(f"  ⚠️  {p['symbol']:8s}  age: {p['age_days']}d  |  PnL: {pnl_str}  → FORCE CLOSE at market")
+    if noprice_positions:
+        print(f"\n  ❓  NO PRICE  (not in current feed — check manually)\n" + "-" * 60)
+        for p in noprice_positions:
+            print(f"  ❓  {p['symbol']:8s}  age: {p['age_days']}d  |  PnL: unknown (coin not in scan feed)")
 
     # Fetch 1-sentence news catalysts for top-10 (Perplexity if key set, else top headline)
     _catalysts: dict[str, str] = {}
@@ -1775,7 +1787,7 @@ def run_smart_scanner(
         deep_dip_tag  = "  [⭐ DEEP DIP]" if r.get("deep_dip") else ""
         hold_tag      = "  [📌 OPEN — HOLD]" if r.get("_already_open") else ""
         print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  score: {r['score']} pts{archetype_tag}{deep_dip_tag}{supply_tag}{hold_tag}")
-        print(f"     Price: {_pfmt(r['price'])}  |  24h: {r['change_24h']:+.1f}%  |  7d: {r['change_7d']:+.1f}%")
+        print(f"     Price: {_pfmt(r.get('price_eur') or r['price'] * _eur)}  |  24h: {r['change_24h']:+.1f}%  |  7d: {r['change_7d']:+.1f}%")
         rsi_str = f"RSI {r['rsi']:.1f}" if r['rsi'] else "RSI N/A"
         ath_str = f"ATH {r['ath_pct']:+.0f}%" if r.get('ath_pct') else ""
         spring  = "  [COILED SPRING]" if r.get("coiled_spring") else ""
@@ -1809,7 +1821,7 @@ def run_smart_scanner(
             print(f"\n  📌  HOLD POSITIONS  (filling {needed} slot(s) — fewer than 3 new picks)\n" + "-" * 60)
             for p in hold_fills:
                 pnl_str = f"{p['pnl_pct']:+.1f}%" if p["pnl_pct"] is not None else "N/A"
-                print(f"  📌 {p['symbol']:8s} HOLD  |  entry: ${p['entry']:.4f}  TP: ${p['tp']:.4f}  "
+                print(f"  📌 {p['symbol']:8s} HOLD  |  entry: €{p['entry'] * _eur:.4f}  TP: €{p['tp'] * _eur:.4f}  "
                       f"PnL: {pnl_str}  age: {p['age_days']}d")
 
     # ── Pump alerts — classified display ──────────────────────────────────
@@ -1826,16 +1838,16 @@ def run_smart_scanner(
             if act == "DO_NOT_CHASE":
                 wins = pc.get("prev_wins", [])
                 wins_str = f" [{len(wins)} prev WIN{'s' if len(wins)!=1 else ''}]" if wins else ""
-                print(f"\n  🐋 {sym:8s} {_pfmt(p)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: ${m:.0f}M")
+                print(f"\n  🐋 {sym:8s} {_pfmt(p * _eur)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: €{m:.0f}M")
                 print(f"     DO NOT CHASE — wait for crash >60% from peak, then auto whale ride{wins_str}")
                 print(f"     Reason: {pc['reason']}")
                 print(f"     Watchlisted ✓  |  Target entry: SL -25% / TP +100% / max 48h / max €{WHALE_RIDE_MAX_EUR:.0f}")
             elif act == "MONITORING":
-                print(f"\n  🔍 {sym:8s} {_pfmt(p)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: ${m:.0f}M")
+                print(f"\n  🔍 {sym:8s} {_pfmt(p * _eur)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: €{m:.0f}M")
                 print(f"     NEW PUMP — monitoring for post-crash whale ride opportunity")
                 print(f"     {pc['reason']}")
             else:  # SKIP
-                print(f"\n  ⛔ {sym:8s} {_pfmt(p)}  |  7d: {ch7d:+.0f}%  — SKIP — {pc['reason']}")
+                print(f"\n  ⛔ {sym:8s} {_pfmt(p * _eur)}  |  7d: {ch7d:+.0f}%  — SKIP — {pc['reason']}")
 
     # ── Auto whale rides from pump watchlist ──────────────────────────────
     all_whale_rides = whale_rides + auto_watchlist_rides
@@ -1848,8 +1860,8 @@ def run_smart_scanner(
             tp   = wr["take_profit"]
             drop = wr.get("drop_from_peak", 0)
             cycles_str = " → ".join(wr["known_cycles"]) if wr["known_cycles"] else "first recorded"
-            print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p)}  (crashed {drop:.0f}% from pump peak)")
-            print(f"     Entry: {_pfmt(p)} | SL: {_pfmt(sl)} (-15% pre-milestone) | TP: {_pfmt(tp)} (+100%)")
+            print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p * _eur)}  (crashed {drop:.0f}% from pump peak)")
+            print(f"     Entry: {_pfmt(p * _eur)} | SL: {_pfmt(sl * _eur)} (-15% pre-milestone) | TP: {_pfmt(tp * _eur)} (+100%)")
             print(f"     Max hold: 48h | Max position: €{WHALE_RIDE_MAX_EUR:.0f}")
             print(f"     Pattern: {cycles_str}")
             print(f"     Reason: {wr['crash_reason']}")
@@ -1858,7 +1870,7 @@ def run_smart_scanner(
     if all_rug_display:
         print(f"\n  ⛔  RUG PULL DETECTED  (excluded)\n" + "-" * 60)
         for sym, price, reason in all_rug_display:
-            print(f"  ✗  {sym:10s}  {_pfmt(price)}  —  {reason}")
+            print(f"  ✗  {sym:10s}  {_pfmt(price * _eur)}  —  {reason}")
 
     if wash_trading:
         print(f"\n  ⚠️  WASH TRADING SUSPECTED  (excluded)\n" + "-" * 60)
@@ -1884,11 +1896,11 @@ def run_smart_scanner(
 
             ch24_wr = wr.get("change_24h", 0)
             ch7d_wr = wr.get("change_7d", 0)
-            print(f"\n  🐋 {sym} {_pfmt(price)} — WHALE RIDE{scam_tag}")
+            print(f"\n  🐋 {sym} {_pfmt(price * _eur)} — WHALE RIDE{scam_tag}")
             print(f"     24h: {ch24_wr:+.1f}%  |  7d: {ch7d_wr:+.1f}%")
             print(f"     Crash: {crash}")
             print(f"     Pattern: {cycles_str}")
-            print(f"     Entry: {_pfmt(price)} | SL: {_pfmt(sl)} (-15%) | TP: {_pfmt(tp)} (+50%)")
+            print(f"     Entry: {_pfmt(price * _eur)} | SL: {_pfmt(sl * _eur)} (-15%) | TP: {_pfmt(tp * _eur)} (+50%)")
             print(f"     Max hold: {hold}h | Cycle #{cyc_num}{ally_str}")
             print(f"     ⚠️ EXTREME RISK — manipulated token, max 5% of portfolio")
 

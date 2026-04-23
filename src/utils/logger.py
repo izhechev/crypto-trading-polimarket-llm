@@ -461,9 +461,21 @@ def _latest_per_coin(rows: list[dict]) -> dict[str, dict]:
 
 
 def _fmt(eur: float, usd: float) -> str:
-    """Format as '€X.XXXX ($Y.YYYY)' choosing decimal places by magnitude."""
+    """Format as '€X.XXXX' choosing decimal places by magnitude."""
     decimals = 2 if eur >= 1 else 4 if eur >= 0.01 else 6 if eur >= 0.0001 else 8
-    return f"€{eur:.{decimals}f} (${usd:.{decimals}f})"
+    return f"€{eur:.{decimals}f}"
+
+
+def _usd_to_eur(usd: float) -> str:
+    """Convert a stored USD price to EUR for display."""
+    try:
+        from src.connectors.coingecko import get_eur_usd_rate
+        rate = get_eur_usd_rate()
+    except Exception:
+        rate = 0.88
+    eur = usd * rate
+    decimals = 2 if eur >= 1 else 4 if eur >= 0.01 else 6 if eur >= 0.0001 else 8
+    return f"€{eur:.{decimals}f}"
 
 
 # ── Public API ────────────────────────────────────────────────────────────
@@ -909,45 +921,71 @@ def update_open_positions() -> None:
     usd_map: dict[str, float] = {}
     eur_map: dict[str, float] = {}
 
-    # Try CoinGecko first (handles legacy CG IDs)
     try:
-        from src.connectors.coingecko import fetch_prices
-        price_objs = fetch_prices(coin_ids)
-        usd_map = {p.coin_id: p.price_usd for p in price_objs}
-        eur_map = {p.coin_id: p.price_eur for p in price_objs}
-    except Exception as e:
-        print(f"  Warning: CoinGecko price fetch failed: {e}")
+        from src.connectors.coingecko import get_eur_usd_rate as _get_eur_rate
+        _EUR = _get_eur_rate()
+    except Exception:
+        _EUR = 0.92
 
-    # CoinPaprika fallback for any positions not resolved by CoinGecko
-    missing_ids = [cid for cid in coin_ids if cid not in usd_map]
-    if missing_ids:
+    # Tier 1: CoinGecko /coins/markets — best data, batch fetch by ID
+    try:
+        from src.connectors.coingecko import fetch_prices as _cg_fetch
+        price_objs = _cg_fetch(coin_ids)
+        for p in price_objs:
+            if p.price_usd > 0:
+                usd_map[p.coin_id] = p.price_usd
+                eur_map[p.coin_id] = p.price_eur
+    except Exception as e:
+        print(f"  Warning: CoinGecko /coins/markets failed: {e}")
+
+    # Tier 2: CoinGecko /simple/price — handles small-cap coins not in /coins/markets
+    _missing = [cid for cid in coin_ids if cid not in usd_map]
+    if _missing:
         try:
-            from src.connectors.coinpaprika import fetch_tickers_for_scanner
-            tickers = fetch_tickers_for_scanner(limit=1000)
-            # Build symbol→price map and cp_id→price map from CP tickers
+            from src.connectors.coingecko import fetch_simple_usd as _cg_simple
+            simple_map = _cg_simple(_missing)
+            for cid, usd_p in simple_map.items():
+                if usd_p > 0:
+                    usd_map[cid] = usd_p
+                    eur_map[cid] = usd_p * _EUR
+            _resolved = [c for c in _missing if c in usd_map]
+            if _resolved:
+                print(f"  ✅  CG /simple/price resolved: {', '.join(_resolved)}")
+        except Exception as e2:
+            print(f"  Warning: CoinGecko /simple/price failed: {e2}")
+
+    # Tier 3: CoinPaprika — different data source, matches by symbol when CG ID unavailable
+    _missing = [cid for cid in coin_ids if cid not in usd_map]
+    if _missing:
+        try:
+            from src.connectors.coinpaprika import fetch_tickers_for_scanner as _cp_fetch
+            tickers = _cp_fetch(limit=1000)
             _cp_sym_usd: dict[str, float] = {}
-            _cp_id_usd:  dict[str, float] = {}
             for t in tickers:
                 sym = t.get("symbol", "").upper()
-                cid = t.get("_cp_id", "")
                 usd = t.get("current_price") or 0
                 if usd > 0:
                     _cp_sym_usd[sym] = usd
-                    if cid:
-                        _cp_id_usd[cid] = usd
-            # Match missing positions by coin_id (CP format) or symbol
-            EUR_RATE = 0.92
             for row in scanner_open:
                 cid = row.get("coin_id", "")
                 if cid in usd_map:
-                    continue  # already resolved
+                    continue
                 sym = row.get("coin", "").upper()
-                usd = _cp_id_usd.get(cid) or _cp_sym_usd.get(sym)
-                if usd:
-                    usd_map[cid] = usd
-                    eur_map[cid] = usd * EUR_RATE
-        except Exception as e2:
-            print(f"  Warning: CoinPaprika fallback failed: {e2}")
+                usd_p = _cp_sym_usd.get(sym)
+                if usd_p and usd_p > 0:
+                    usd_map[cid] = usd_p
+                    eur_map[cid] = usd_p * _EUR
+            _resolved_cp = [cid for cid in _missing if cid in usd_map]
+            if _resolved_cp:
+                syms_cp = [r.get("coin","") for r in scanner_open if r.get("coin_id") in _resolved_cp]
+                print(f"  ✅  CoinPaprika resolved: {', '.join(syms_cp)}")
+        except Exception as e3:
+            print(f"  Warning: CoinPaprika fallback failed: {e3}")
+
+    still_missing = [cid for cid in coin_ids if cid not in usd_map]
+    if still_missing:
+        syms_missing = [r.get("coin","?") for r in scanner_open if r.get("coin_id") in still_missing]
+        print(f"  ⚠️  Price unavailable after all sources — skipping update for: {', '.join(syms_missing)}")
 
     if not usd_map:
         print("  Warning: could not fetch prices for tracking: all sources failed")
@@ -963,7 +1001,7 @@ def update_open_positions() -> None:
             continue
         usd = usd_map.get(row["coin_id"])
         if usd is None:
-            continue
+            continue  # all 3 sources were tried above — skip rather than close on missing price
 
         try:
             entry = float(row["entry_price"])
@@ -1085,7 +1123,7 @@ def update_open_positions() -> None:
                 row["exit_price"] = round(usd, 6)
                 row["close_date"] = _now_str
                 closed += 1
-                print(f"  🛑 WHALE_RIDE SL HIT: {row['coin']} {pnl_pct:+.1f}% (entry ${entry:.6f} → ${usd:.6f} ≤ SL ${sl:.6f})")
+                print(f"  🛑 WHALE_RIDE SL HIT: {row['coin']} {pnl_pct:+.1f}% (entry {_usd_to_eur(entry)} → {_usd_to_eur(usd)} ≤ SL {_usd_to_eur(sl)})")
             elif pnl_pct <= -99.9:
                 row["status"]     = "LOSS"
                 row["exit_price"] = round(usd, 6)
@@ -1135,6 +1173,47 @@ def update_open_positions() -> None:
                 continue
         except Exception:
             pass
+
+        # Trailing SL: raise stop floor as position becomes profitable.
+        # Prevents partial winners from being wiped back to entry losses.
+        # +10% → SL moves to breakeven | +15% → SL to +5% | +25% → SL to +10%
+        _reasoning = row.get("reasoning", "")
+        if pnl_pct >= 25 and "[TRAIL_10]" not in _reasoning and sl < round(entry * 1.10, 8):
+            sl = round(entry * 1.10, 8)
+            row["stop_loss"] = sl
+            row["reasoning"] = _reasoning + " [TRAIL_10]"
+            print(f"  📈 TRAIL SL: {row['coin']} at {pnl_pct:+.1f}% → SL locked at +10%")
+            try:
+                from src.utils.telegram import send_telegram as _tg
+                _tg(f"📈 <b>SL TRAILED — {row['coin']}</b>\n"
+                    f"  Position at {pnl_pct:+.1f}% → stop loss raised to <b>+10%</b>\n"
+                    f"  Your downside is now capped at +10% profit.")
+            except Exception:
+                pass
+        elif pnl_pct >= 15 and "[TRAIL_5]" not in _reasoning and "[TRAIL_10]" not in _reasoning and sl < round(entry * 1.05, 8):
+            sl = round(entry * 1.05, 8)
+            row["stop_loss"] = sl
+            row["reasoning"] = _reasoning + " [TRAIL_5]"
+            print(f"  📈 TRAIL SL: {row['coin']} at {pnl_pct:+.1f}% → SL locked at +5%")
+            try:
+                from src.utils.telegram import send_telegram as _tg
+                _tg(f"📈 <b>SL TRAILED — {row['coin']}</b>\n"
+                    f"  Position at {pnl_pct:+.1f}% → stop loss raised to <b>+5%</b>\n"
+                    f"  Worst case now: small profit.")
+            except Exception:
+                pass
+        elif pnl_pct >= 10 and "[BREAKEVEN]" not in _reasoning and "[TRAIL_5]" not in _reasoning and "[TRAIL_10]" not in _reasoning and sl < entry:
+            sl = round(entry, 8)
+            row["stop_loss"] = sl
+            row["reasoning"] = _reasoning + " [BREAKEVEN]"
+            print(f"  📈 TRAIL SL: {row['coin']} at {pnl_pct:+.1f}% → SL locked at breakeven")
+            try:
+                from src.utils.telegram import send_telegram as _tg
+                _tg(f"📈 <b>BREAKEVEN LOCKED — {row['coin']}</b>\n"
+                    f"  Position at {pnl_pct:+.1f}% → stop loss raised to entry price.\n"
+                    f"  <b>This position can no longer lose money.</b> Let it run.")
+            except Exception:
+                pass
 
         if tp > 0 and usd >= tp:
             row["status"]     = "WIN"
@@ -1458,7 +1537,13 @@ def print_track_record() -> None:
     # ── 1. PORTFOLIO ──────────────────────────────────────────────────────
     portfolio_rows = [r for r in rows if r.get("type") == "PORTFOLIO"]
     print(f"\n  {'─'*_W}")
-    print(f"  PORTFOLIO  (portfolio.json)")
+    # Detect source from reasoning field: "amount:X|src:Kraken" → Kraken live
+    _pf_src = "portfolio.json"
+    for r in portfolio_rows[:5]:
+        if "|src:Kraken" in r.get("reasoning", ""):
+            _pf_src = "Kraken (live)"
+            break
+    print(f"  PORTFOLIO  ({_pf_src})")
     print(f"  {'─'*_W}")
 
     if portfolio_rows:
@@ -1659,7 +1744,7 @@ def print_track_record() -> None:
                 print(
                     f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
                     f"  ({days_open}d)"
-                    f"  entry ${float(r['entry_price']):.4f}  now {_fmt(eur, usd)}"
+                    f"  entry {_usd_to_eur(float(r['entry_price']))}  now {_fmt(eur, usd)}"
                 )
             except (ValueError, KeyError):
                 pass
@@ -1729,24 +1814,27 @@ def print_track_record() -> None:
         wr_avg = sum(wr_pnls) / len(wr_pnls) if wr_pnls else 0
 
         # Milestone-adjusted win rate: a closed LOSS that hit a milestone
-        # counts as effective WIN (principal was recovered before the drawdown)
+        # counts as effective WIN (principal was recovered before the drawdown).
+        # OPEN positions that hit a milestone also count — principal is already recovered.
         _ms_coin_dates = {
             (r.get("coin", "").upper(), r.get("date", ""))
             for r in milestone_rows
         }
         wr_eff_win  = sum(
             1 for r in whale_rows
-            if r.get("status") in ("WIN", "LOSS")
+            if r.get("status") in ("WIN", "LOSS", "OPEN")
             and (
                 r.get("status") == "WIN"
                 or (r.get("coin", "").upper(), r.get("date", "")) in _ms_coin_dates
             )
         )
-        wr_eff_loss = wr_closed - wr_eff_win
-        wr_eff_rate = (wr_eff_win / wr_closed * 100) if wr_closed else 0
+        wr_total    = len(whale_rows)  # open + closed
+        wr_eff_loss = wr_total - wr_eff_win
+        wr_eff_rate = (wr_eff_win / wr_total * 100) if wr_total else 0
 
         # Milestone stats (partial wins — separate from full ride closes)
-        ms_wins = len(milestone_rows)
+        ms_events = len(milestone_rows)
+        ms_unique = len(_ms_coin_dates)  # unique positions that hit a milestone
         ms_pnls = []
         for r in milestone_rows:
             try:
@@ -1755,16 +1843,30 @@ def print_track_record() -> None:
                 pass
         ms_avg = sum(ms_pnls) / len(ms_pnls) if ms_pnls else 0
 
+        # Pure closed WINs that never hit a milestone (clean profitable exits)
+        _raw_win_no_ms = sum(
+            1 for r in whale_rows
+            if r.get("status") == "WIN"
+            and (r.get("coin", "").upper(), r.get("date", "")) not in _ms_coin_dates
+        )
+        # Total wins = every milestone event + clean closes without milestones
+        _total_wins = ms_events + _raw_win_no_ms
+        # Pure losses = closed positions that never hit any milestone AND closed negative
+        _pure_loss = sum(
+            1 for r in whale_rows
+            if r.get("status") == "LOSS"
+            and (r.get("coin", "").upper(), r.get("date", "")) not in _ms_coin_dates
+        )
+
         print(f"\n  {'─'*_W}")
-        print(f"  WHALE RIDES  ({len(whale_rows)} positions  |  {ms_wins} milestone wins)")
+        print(f"  WHALE RIDES  ({len(whale_rows)} positions  |  {ms_unique} hit +25%  |  {ms_events} milestones)")
         print(f"  {'─'*_W}")
-        print(f"  Open: {wr_open}  Closed: {wr_closed}  (Win: {wr_win}  Loss: {wr_loss})")
-        if wr_closed:
-            print(f"  Raw close rate:  {wr_rate:.0f}%  Avg P&L: {wr_avg:+.1f}%")
-            if wr_eff_win != wr_win:
-                print(f"  Milestone-adj rate: {wr_eff_rate:.0f}%  ({wr_eff_win} wins — principal recovered before close)")
-        if ms_wins:
-            print(f"  Milestones hit: {ms_wins}  Avg milestone P&L: {ms_avg:+.1f}%  (position stays open)")
+        _win_rate = (_total_wins / (_total_wins + _pure_loss) * 100) if (_total_wins + _pure_loss) else 0
+        print(f"  Open: {wr_open}  Closed: {wr_closed}  Pure loss: {_pure_loss}")
+        print(f"  Win events: {_total_wins}  ({ms_events} milestones + {_raw_win_no_ms} clean closes)")
+        print(f"  Win rate: {_win_rate:.0f}%  ({_total_wins} wins vs {_pure_loss} pure losses)")
+        if ms_events:
+            print(f"  Milestones: {ms_events} events  Avg: {ms_avg:+.1f}%  (position stays open)")
 
         open_wr = [r for r in whale_rows if r.get("status") == "OPEN"]
         if open_wr:
@@ -1787,7 +1889,7 @@ def print_track_record() -> None:
                         stage_tag = f"  [{sm.group(1)}]" if sm else ""
                         print(
                             f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
-                            f"  ({hrs_open:.0f}h)  entry ${float(r['entry_price']):.6f}"
+                            f"  ({hrs_open:.0f}h)  entry {_usd_to_eur(float(r['entry_price']))}"
                             f"  now {_fmt(eur, usd)}{stage_tag}  Manual trade"
                         )
                     else:
@@ -1798,7 +1900,7 @@ def print_track_record() -> None:
                         print(
                             f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
                             f"  ({hrs_open:.0f}/{max_hold}h, {hrs_left:.0f}h left)"
-                            f"  entry ${float(r['entry_price']):.6f}  now {_fmt(eur, usd)}{scam}"
+                            f"  entry {_usd_to_eur(float(r['entry_price']))}  now {_fmt(eur, usd)}{scam}"
                         )
                 except (ValueError, KeyError):
                     pass
@@ -1819,7 +1921,7 @@ def print_track_record() -> None:
                     scam   = " ⚠️" if "SERIAL SCAM" in reasoning else ""
                     print(
                         f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
-                        f"  entry ${entry:.6f} → exit ${exit_p:.6f}  ({date}){scam}"
+                        f"  entry {_usd_to_eur(entry)} → exit {_usd_to_eur(exit_p)}  ({date}){scam}"
                     )
                 except (ValueError, KeyError):
                     pass
@@ -1833,7 +1935,7 @@ def print_track_record() -> None:
                     entry  = float(r["entry_price"])
                     exit_p = float(r["exit_price"])
                     date   = (r.get("close_date") or r["date"])[:10]
-                    print(f"    [+{pnl:.0f}%] {r['coin']:8s}  entry ${entry:.6f} → milestone ${exit_p:.6f}  ({date})")
+                    print(f"    [+{pnl:.0f}%] {r['coin']:8s}  entry {_usd_to_eur(entry)} → milestone {_usd_to_eur(exit_p)}  ({date})")
                 except (ValueError, KeyError):
                     pass
 
