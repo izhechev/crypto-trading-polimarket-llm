@@ -766,7 +766,7 @@ def _parse_age_days(date_val) -> int | None:
 
 def fetch_news_for_coins(
     coins: list[dict],
-    limit_per_coin: int = 4,
+    limit_per_coin: int = 10,
 ) -> dict[str, list[dict]]:
     """
     Batch-fetch per-coin news.  Priority:
@@ -815,28 +815,41 @@ def fetch_news_for_coins(
                 _add((res.get("title") or "").strip(), None, "Tavily")
             time.sleep(0.2)
         else:
-            # ── 2. Google News RSS — free fallback ───────────────────────────
+            # ── 2. Google News RSS — free fallback (fetch more for better coverage) ──
             if len(sym) <= 2:
                 gn_query = f"{name} cryptocurrency" if name else f"{sym} crypto"
             elif len(sym) <= 4:
                 gn_query = f"{name} crypto" if name else f"{sym} cryptocurrency"
             else:
                 gn_query = f"{sym} {name} crypto".strip() if name else f"{sym} cryptocurrency"
-            for gn in search_google_news(gn_query, limit=5):
+            for gn in search_google_news(gn_query, limit=10):
                 _add(gn.get("title", ""), gn.get("date"), "GoogleNews")
 
-            # ── 3. CryptoPanic (optional key) ────────────────────────────────
+            # ── 2b. Google News RSS second pass — risk/bearish angle ─────────
+            risk_query = f"{sym} crypto hack scam risk news" if len(sym) > 2 else f"{name} crypto risk"
+            for gn in search_google_news(risk_query, limit=5):
+                _add(gn.get("title", ""), gn.get("date"), "GoogleNews")
+
+            # ── 3. CryptoCompare — always try (no key required for basic use) ─
+            try:
+                cc_news = search_cryptocompare_news(sym, limit=5)
+                for item in cc_news:
+                    _add(item.get("title", ""), item.get("date"), "CryptoCompare")
+            except Exception:
+                pass
+
+            # ── 4. CryptoPanic (optional key) ────────────────────────────────
             if _cp_enabled:
                 try:
                     from src.connectors.cryptopanic import _cp_fetch, _parse_cp
                     cp_results = _cp_fetch(sym) or _cp_fetch(name, by_name=True)
-                    for article in _parse_cp(cp_results, limit=4):
+                    for article in _parse_cp(cp_results, limit=5):
                         _add(article.get("title", ""), None, "CryptoPanic")
                 except Exception:
                     pass
 
         if items:
-            per_coin[sym] = items[:limit_per_coin + 4]   # keep up to 8 for scoring signal
+            per_coin[sym] = items[:limit_per_coin + 5]   # keep generously for scoring
 
     return per_coin
 

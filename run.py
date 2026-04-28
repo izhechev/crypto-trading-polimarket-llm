@@ -177,15 +177,15 @@ def _get_kraken_symbols_cached() -> set[str]:
 
 _whale_coins_cache: list[dict] = []
 _whale_coins_ts: float = 0.0
-_WHALE_COINS_TTL: int = 3600  # 1 hour — top-1000 list doesn't change every 15 min
+_WHALE_COINS_TTL: int = 14400   # 4 hours — coin list structure rarely changes
+_WHALE_COINS_STALE_PATH = Path(__file__).parent / "data" / "_whale_coins_stale.json"
 
 
-def _fetch_coins_whale(pages: int = 3) -> list[dict]:
+def _fetch_coins_whale(pages: int = 4) -> list[dict]:
     """
     Fetch top coins for whale detection.
-    Primary: CoinPaprika (single free request, 1000 coins).
-    Fallback: CoinGecko (pages×250, rate-limited).
-    Cached for 1 hour.
+    Fallback chain: CoinPaprika → CoinGecko → CoinCap.
+    Coin list cached 4h in-memory + on-disk stale cache survives restarts.
     """
     import time as _time
 
@@ -193,21 +193,22 @@ def _fetch_coins_whale(pages: int = 3) -> list[dict]:
 
     age = _time.time() - _whale_coins_ts
     if _whale_coins_cache and age < _WHALE_COINS_TTL:
-        print(f"  [CP cache] whale coins: using cached data ({age/60:.0f}min old, "
-              f"refreshes in {(_WHALE_COINS_TTL - age)/60:.0f}min)")
+        print(f"  [cache] whale coins: {len(_whale_coins_cache)} coins "
+              f"({age/60:.0f}min old, refreshes in {(_WHALE_COINS_TTL - age)/60:.0f}min)")
         return _whale_coins_cache
 
-    # Try CoinPaprika first
     all_coins: list[dict] = []
+
+    # ── 1. CoinPaprika (primary, single request, ~2000 coins) ─────────────
     try:
         from src.connectors.coinpaprika import fetch_tickers_for_scanner as _cp_tickers
         all_coins = _cp_tickers(limit=1000)
         if all_coins:
-            print(f"  [CP] whale coins: fetched {len(all_coins)} coins from CoinPaprika")
+            print(f"  [CP] whale coins: {len(all_coins)} coins")
     except Exception as e:
-        print(f"  ⚠️  CoinPaprika whale fetch failed: {e} — falling back to CoinGecko")
+        print(f"  ⚠️  CoinPaprika failed: {e}")
 
-    # CoinGecko fallback
+    # ── 2. CoinGecko fallback (pages×250, free tier 30/min) ───────────────
     if not all_coins:
         import httpx
         import config as _cfg
@@ -222,12 +223,12 @@ def _fetch_coins_whale(pages: int = 3) -> list[dict]:
                         client,
                         "https://api.coingecko.com/api/v3/coins/markets",
                         params={
-                            "vs_currency":            "usd",
-                            "order":                  "market_cap_desc",
-                            "per_page":               250,
-                            "page":                   page,
+                            "vs_currency":             "usd",
+                            "order":                   "market_cap_desc",
+                            "per_page":                250,
+                            "page":                    page,
                             "price_change_percentage": "24h,7d",
-                            "sparkline":              "false",
+                            "sparkline":               "false",
                         },
                         headers=headers,
                     )
@@ -237,16 +238,70 @@ def _fetch_coins_whale(pages: int = 3) -> list[dict]:
                         break
                     all_coins.extend(batch)
             except Exception as e:
-                print(f"  ⚠️  CoinGecko page {page} failed: {e}")
-                break
+                print(f"  ⚠️  CoinGecko page {page} failed: {e} — continuing")
+                continue  # don't break — try remaining pages and next fallback
             if page < pages:
                 _time.sleep(1.2)
         if all_coins:
-            print(f"  [CG] whale coins: fetched {len(all_coins)} coins from CoinGecko")
+            print(f"  [CG] whale coins: {len(all_coins)} coins")
+
+    # ── 3. CoinCap fallback (free, no key, up to 2000 assets) ─────────────
+    if not all_coins:
+        try:
+            import httpx
+            with httpx.Client(timeout=30) as client:
+                resp = client.get(
+                    "https://api.coincap.io/v2/assets",
+                    params={"limit": 2000, "offset": 0},
+                )
+                resp.raise_for_status()
+                raw = resp.json().get("data", [])
+            for c in raw:
+                try:
+                    price = float(c.get("priceUsd") or 0)
+                    mcap  = float(c.get("marketCapUsd") or 0)
+                    vol   = float(c.get("volumeUsd24Hr") or 0)
+                    ch24  = float(c.get("changePercent24Hr") or 0)
+                    all_coins.append({
+                        "id":             c.get("id", ""),
+                        "symbol":         (c.get("symbol") or "").upper(),
+                        "name":           c.get("name", ""),
+                        "current_price":  price,
+                        "market_cap":     mcap,
+                        "total_volume":   vol,
+                        "price_change_percentage_24h":            ch24,
+                        "price_change_percentage_7d_in_currency": 0.0,
+                        "circulating_supply": float(c.get("supply") or 0),
+                        "total_supply":       float(c.get("maxSupply") or 0),
+                        "_from_coincap":  True,
+                    })
+                except (ValueError, TypeError):
+                    continue
+            if all_coins:
+                print(f"  [CoinCap] whale coins: {len(all_coins)} coins")
+        except Exception as e:
+            print(f"  ⚠️  CoinCap failed: {e}")
+
+    # ── 4. Disk stale cache (last resort — survives restarts) ──────────────
+    if not all_coins:
+        try:
+            if _WHALE_COINS_STALE_PATH.exists():
+                all_coins = json.loads(_WHALE_COINS_STALE_PATH.read_text(encoding="utf-8"))
+                print(f"  [stale] whale coins: {len(all_coins)} coins from disk cache")
+        except Exception:
+            pass
 
     if all_coins:
         _whale_coins_cache = all_coins
         _whale_coins_ts    = _time.time()
+        # Persist to disk for next restart
+        try:
+            _WHALE_COINS_STALE_PATH.parent.mkdir(exist_ok=True)
+            _WHALE_COINS_STALE_PATH.write_text(
+                json.dumps(all_coins, default=str), encoding="utf-8"
+            )
+        except Exception:
+            pass
 
     return all_coins
 
@@ -266,6 +321,8 @@ def run_whale_check() -> None:
             check_exit_signals,
             display_late_stage,
             update_volume_history,
+            detect_sector_rotation,
+            send_sector_rotation_alerts,
         )
         from src.connectors.coingecko import fetch_fear_greed
 
@@ -297,6 +354,9 @@ def run_whale_check() -> None:
             )
             print(f"  🐋 {len(candidates)} whale ride candidate(s): {syms_str}")
             send_whale_ride_alerts(candidates, fg)
+            rotations = detect_sector_rotation(candidates)
+            if rotations:
+                send_sector_rotation_alerts(rotations, fg)
         else:
             print("  No whale ride signals this cycle")
 
@@ -321,7 +381,7 @@ def run_scan_cycle(
     from src.utils.logger import (
         log_scanner_results, update_scanner_sltp, update_open_positions,
         log_portfolio_positions, log_watchlist_prices,
-        log_price_history, print_track_record, print_daily_activity,
+        log_price_history, print_track_record, print_daily_activity, print_scan_summary,
     )
     from src.utils.enrichment import fetch_enrichment
     from src.utils.telegram import send_telegram
@@ -436,6 +496,7 @@ def run_scan_cycle(
     top10, pump_alerts, whale_rides, quality_count, tavily_catalysts = run_smart_scanner(exchange=exchange, fear_greed=fg, open_count=_open_count)
     if not top10:
         print("  No results from scanner — skipping analysis.")
+        print_scan_summary(top10=[], whale_rides=[], fear_greed=fg)
         print_track_record()
         return
 
@@ -884,6 +945,9 @@ def run_scan_cycle(
 
     # Daily activity summary (pure CSV, no API needed)
     print_daily_activity()
+
+    # v2.0 clean scan summary: open positions, top 10, open whale rides, top 10 whale suspects
+    print_scan_summary(top10=top10, whale_rides=whale_rides, fear_greed=fg)
 
     # Combined track record
     print_header("TRACK RECORD")

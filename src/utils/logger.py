@@ -480,6 +480,9 @@ def _usd_to_eur(usd: float) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────
 
+_MAX_OPEN_SCANNER = 15   # v2.0: hard cap — never open more than 15 concurrent scanner positions
+
+
 def log_recommendation(rec: dict, fear_greed_value: int) -> None:
     """
     Append a new scanner recommendation with status=OPEN and type=SCANNER.
@@ -498,6 +501,16 @@ def log_recommendation(rec: dict, fear_greed_value: int) -> None:
     )
     if already_open:
         print(f"  Skipped — {coin} already has an OPEN scanner position")
+        return
+
+    # Max concurrent positions cap — quality over quantity
+    open_count = sum(
+        1 for r in rows
+        if r.get("type", "SCANNER") in ("SCANNER", "")
+        and r.get("status") == "OPEN"
+    )
+    if open_count >= _MAX_OPEN_SCANNER:
+        print(f"  Skipped — {coin}: max open positions reached ({open_count}/{_MAX_OPEN_SCANNER})")
         return
 
     # Category guard: if this coin has an OPEN WHALE_RIDE entry, close it as EXCLUDED
@@ -702,13 +715,15 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
         print(f"  Skipped WHALE_RIDE — {coin} is already open as SCANNER (category guard)")
         return
 
-    # Note previous cycles in reasoning
+    # Note previous cycles + tier in reasoning (tier is read back in update_open_positions)
     cycles_str = " → ".join(wr.get("known_cycles", [])) or "no prior cycles"
     scam_note  = " | SERIAL SCAM" if wr.get("is_serial_scam") else ""
+    ride_tier  = wr.get("ride_tier", "standard")
+    tier_note  = " | [RISKY_TIER -10% SL]" if ride_tier == "risky" else ""
     reasoning  = (
         f"Cycle #{wr.get('cycle_number',1)} | {cycles_str}"
         f" | crash: {wr.get('crash_reason','')}"
-        f" | max_hold: {wr.get('max_hold_hours',48)}h{scam_note}"
+        f" | max_hold: {wr.get('max_hold_hours',48)}h{scam_note}{tier_note}"
     )
 
     rows.append({
@@ -927,69 +942,211 @@ def update_open_positions() -> None:
     except Exception:
         _EUR = 0.92
 
-    # Tier 1: CoinGecko /coins/markets — best data, batch fetch by ID
+    # Build symbol→CG-ID translation so CP-format coin_ids work with CoinGecko.
+    # Most open positions were recorded with CoinPaprika IDs (e.g. "op-optimism")
+    # which CoinGecko silently ignores. We translate via SYMBOL_TO_CG_ID first.
+    import httpx as _httpx
+    from src.connectors.coingecko import _headers as _cg_headers
+    from src.connectors.coinpaprika import SYMBOL_TO_CG_ID as _SYM_TO_CG
+
+    # _cid_to_cg: stored coin_id → CG ID to query (may differ for CP-format IDs)
+    _cid_to_cg: dict[str, str] = {}
+    for _row in scanner_open:
+        _cid = _row.get("coin_id", "")
+        _sym = _row.get("coin", "").upper()
+        if not _cid:
+            continue
+        # CG IDs are lowercase with hyphens; CP IDs follow "{ticker}-{name}" pattern.
+        # Heuristic: if the first hyphen-segment matches the ticker, it's a CP ID.
+        _first_seg = _cid.split("-")[0].upper() if "-" in _cid else ""
+        _is_cp = bool(_first_seg and _first_seg == _sym)
+        if _is_cp:
+            _cg_id = _SYM_TO_CG.get(_sym)
+            _cid_to_cg[_cid] = _cg_id if _cg_id else _cid  # fallback: keep as-is
+        else:
+            _cid_to_cg[_cid] = _cid  # already CG format
+
+    # Reverse map: CG ID → all stored coin_ids that use it
+    _cg_to_cids: dict[str, list[str]] = {}
+    for _cid, _cgid in _cid_to_cg.items():
+        _cg_to_cids.setdefault(_cgid, []).append(_cid)
+
+    _cg_ids_to_fetch = list(_cg_to_cids.keys())
+
+    # Tier 1: CoinGecko /simple/price — fast, single attempt, CG-translated IDs.
+    # Avoids the 4-retry blocking of /coins/markets when CG is rate-limited.
     try:
-        from src.connectors.coingecko import fetch_prices as _cg_fetch
-        price_objs = _cg_fetch(coin_ids)
-        for p in price_objs:
-            if p.price_usd > 0:
-                usd_map[p.coin_id] = p.price_usd
-                eur_map[p.coin_id] = p.price_eur
-    except Exception as e:
-        print(f"  Warning: CoinGecko /coins/markets failed: {e}")
+        _cg_resp = _httpx.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": ",".join(_cg_ids_to_fetch), "vs_currencies": "usd"},
+            headers=_cg_headers(),
+            timeout=15,
+        )
+        if _cg_resp.status_code == 200:
+            for _cgid, _data in _cg_resp.json().items():
+                _usd_p = _data.get("usd")
+                if _usd_p:
+                    for _cid in _cg_to_cids.get(_cgid, [_cgid]):
+                        usd_map[_cid] = float(_usd_p)
+                        eur_map[_cid] = float(_usd_p) * _EUR
+        else:
+            print(f"  [tracking] CG /simple/price HTTP {_cg_resp.status_code}")
+    except Exception as _e1:
+        print(f"  [tracking] CG price fetch failed: {_e1}")
 
-    # Tier 2: CoinGecko /simple/price — handles small-cap coins not in /coins/markets
+    # Tier 2: Binance public ticker — free, no key, covers most coins by {SYM}USDT pair.
     _missing = [cid for cid in coin_ids if cid not in usd_map]
     if _missing:
         try:
-            from src.connectors.coingecko import fetch_simple_usd as _cg_simple
-            simple_map = _cg_simple(_missing)
-            for cid, usd_p in simple_map.items():
-                if usd_p > 0:
-                    usd_map[cid] = usd_p
-                    eur_map[cid] = usd_p * _EUR
-            _resolved = [c for c in _missing if c in usd_map]
-            if _resolved:
-                print(f"  ✅  CG /simple/price resolved: {', '.join(_resolved)}")
-        except Exception as e2:
-            print(f"  Warning: CoinGecko /simple/price failed: {e2}")
+            _bn_resp = _httpx.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                timeout=15,
+            )
+            if _bn_resp.status_code == 200:
+                _bn_sym: dict[str, float] = {}
+                for _tk in _bn_resp.json():
+                    _s = _tk.get("symbol", "")
+                    if _s.endswith("USDT"):
+                        _base = _s[:-4]
+                        try:
+                            _bn_sym[_base] = float(_tk["price"])
+                        except (ValueError, TypeError):
+                            pass
+                _bn_found: list[str] = []
+                for _row in scanner_open:
+                    _cid = _row.get("coin_id", "")
+                    if _cid in usd_map:
+                        continue
+                    _sym = _row.get("coin", "").upper()
+                    _p   = _bn_sym.get(_sym)
+                    if _p and _p > 0:
+                        usd_map[_cid] = _p
+                        eur_map[_cid] = _p * _EUR
+                        _bn_found.append(_cid)
+                if _bn_found:
+                    _syms_bn = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _bn_found]
+                    print(f"  Binance resolved: {', '.join(_syms_bn)}")
+            else:
+                print(f"  [tracking] Binance HTTP {_bn_resp.status_code}")
+        except Exception as _e2:
+            print(f"  [tracking] Binance fetch failed: {_e2}")
 
-    # Tier 3: CoinPaprika — different data source, matches by symbol when CG ID unavailable
+    # Tier 3: KuCoin all-tickers — covers long-tail and meme coins not on Binance.
     _missing = [cid for cid in coin_ids if cid not in usd_map]
     if _missing:
         try:
-            from src.connectors.coinpaprika import fetch_tickers_for_scanner as _cp_fetch
-            tickers = _cp_fetch(limit=1000)
-            _cp_sym_usd: dict[str, float] = {}
-            for t in tickers:
-                sym = t.get("symbol", "").upper()
-                usd = t.get("current_price") or 0
-                if usd > 0:
-                    _cp_sym_usd[sym] = usd
-            for row in scanner_open:
-                cid = row.get("coin_id", "")
-                if cid in usd_map:
-                    continue
-                sym = row.get("coin", "").upper()
-                usd_p = _cp_sym_usd.get(sym)
-                if usd_p and usd_p > 0:
-                    usd_map[cid] = usd_p
-                    eur_map[cid] = usd_p * _EUR
-            _resolved_cp = [cid for cid in _missing if cid in usd_map]
-            if _resolved_cp:
-                syms_cp = [r.get("coin","") for r in scanner_open if r.get("coin_id") in _resolved_cp]
-                print(f"  ✅  CoinPaprika resolved: {', '.join(syms_cp)}")
-        except Exception as e3:
-            print(f"  Warning: CoinPaprika fallback failed: {e3}")
+            _kc_resp = _httpx.get(
+                "https://api.kucoin.com/api/v1/market/allTickers",
+                timeout=20,
+            )
+            if _kc_resp.status_code == 200:
+                _kc_sym: dict[str, float] = {}
+                for _tk in _kc_resp.json().get("data", {}).get("ticker", []):
+                    _s = _tk.get("symbol", "")
+                    if _s.endswith("-USDT"):
+                        try:
+                            _p = float(_tk.get("last") or 0)
+                            if _p > 0:
+                                _kc_sym[_s[:-5]] = _p
+                        except (ValueError, TypeError):
+                            pass
+                _kc_found: list[str] = []
+                for _row in scanner_open:
+                    _cid = _row.get("coin_id", "")
+                    if _cid in usd_map:
+                        continue
+                    _sym = _row.get("coin", "").upper()
+                    _p   = _kc_sym.get(_sym)
+                    if _p and _p > 0:
+                        usd_map[_cid] = _p
+                        eur_map[_cid] = _p * _EUR
+                        _kc_found.append(_cid)
+                if _kc_found:
+                    _syms_kc = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _kc_found]
+                    print(f"  KuCoin resolved: {', '.join(_syms_kc)}")
+            else:
+                print(f"  [tracking] KuCoin HTTP {_kc_resp.status_code}")
+        except Exception as _e3:
+            pass  # KuCoin might be unavailable — silently skip
+
+    # Tier 4: Gate.io — covers very small-cap / new coins not on Binance or KuCoin.
+    _missing = [cid for cid in coin_ids if cid not in usd_map]
+    if _missing:
+        try:
+            _gt_resp = _httpx.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=20)
+            if _gt_resp.status_code == 200:
+                _gt_sym: dict[str, float] = {}
+                for _tk in _gt_resp.json():
+                    _s = _tk.get("currency_pair", "")
+                    if _s.endswith("_USDT"):
+                        try:
+                            _p = float(_tk.get("last") or 0)
+                            if _p > 0:
+                                _gt_sym[_s[:-5]] = _p
+                        except (ValueError, TypeError):
+                            pass
+                _gt_found: list[str] = []
+                for _row in scanner_open:
+                    _cid = _row.get("coin_id", "")
+                    if _cid in usd_map:
+                        continue
+                    _sym = _row.get("coin", "").upper()
+                    _p   = _gt_sym.get(_sym)
+                    if _p and _p > 0:
+                        usd_map[_cid] = _p
+                        eur_map[_cid] = _p * _EUR
+                        _gt_found.append(_cid)
+                if _gt_found:
+                    _syms_gt = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _gt_found]
+                    print(f"  Gate.io resolved: {', '.join(_syms_gt)}")
+            else:
+                print(f"  [tracking] Gate.io HTTP {_gt_resp.status_code}")
+        except Exception as _e4:
+            pass
+
+    # Tier 5: CoinCap bulk assets — free fallback (may fail on some networks).
+    _missing = [cid for cid in coin_ids if cid not in usd_map]
+    if _missing:
+        try:
+            _cc_resp = _httpx.get(
+                "https://api.coincap.io/v2/assets",
+                params={"limit": 2000},
+                timeout=20,
+            )
+            if _cc_resp.status_code == 200:
+                _cc_sym: dict[str, float] = {}
+                for _a in _cc_resp.json().get("data", []):
+                    _sym = (_a.get("symbol") or "").upper()
+                    _p   = _a.get("priceUsd")
+                    if _sym and _p:
+                        try:
+                            _cc_sym[_sym] = float(_p)
+                        except (ValueError, TypeError):
+                            pass
+                _cc_found: list[str] = []
+                for _row in scanner_open:
+                    _cid = _row.get("coin_id", "")
+                    if _cid in usd_map:
+                        continue
+                    _sym = _row.get("coin", "").upper()
+                    _p   = _cc_sym.get(_sym)
+                    if _p and _p > 0:
+                        usd_map[_cid] = _p
+                        eur_map[_cid] = _p * _EUR
+                        _cc_found.append(_cid)
+                if _cc_found:
+                    _syms_cc = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _cc_found]
+                    print(f"  CoinCap resolved: {', '.join(_syms_cc)}")
+        except Exception as _e4:
+            pass  # CoinCap might be unavailable (DNS/network) — silently skip
 
     still_missing = [cid for cid in coin_ids if cid not in usd_map]
     if still_missing:
         syms_missing = [r.get("coin","?") for r in scanner_open if r.get("coin_id") in still_missing]
-        print(f"  ⚠️  Price unavailable after all sources — skipping update for: {', '.join(syms_missing)}")
+        print(f"  ⚠️  Price unavailable — skipping update for: {', '.join(syms_missing)}")
 
     if not usd_map:
-        print("  Warning: could not fetch prices for tracking: all sources failed")
-        return
+        print("  Warning: could not fetch prices for tracking: all sources failed — time-expiry closes still run")
 
     closed    = 0
     new_wins: list[dict] = []
@@ -1001,7 +1158,31 @@ def update_open_positions() -> None:
             continue
         usd = usd_map.get(row["coin_id"])
         if usd is None:
-            continue  # all 3 sources were tried above — skip rather than close on missing price
+            # Even without a live price, close WHALE_RIDE positions whose time limit has expired.
+            # Uses last known price (current_price) so PnL is approximate but the close is correct.
+            if row_type == "WHALE_RIDE":
+                import re as _re_te
+                try:
+                    _entry_dt_te = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                    _hrs_te = (datetime.now(timezone.utc) - _entry_dt_te).total_seconds() / 3600
+                    _m_te   = _re_te.search(r"max_hold:\s*(\d+)h", row.get("reasoning", ""))
+                    _mh_te  = int(_m_te.group(1)) if _m_te else 48
+                    if _hrs_te >= _mh_te:
+                        _last_p  = float(row.get("current_price") or row.get("entry_price") or 0)
+                        _ent_te  = float(row.get("entry_price") or 0)
+                        _pnl_te  = (_last_p - _ent_te) / _ent_te * 100 if _ent_te > 0 else 0
+                        _te_st   = "WIN" if _pnl_te > 0 else "LOSS"
+                        row["status"]     = _te_st
+                        row["exit_price"] = round(_last_p, 6)
+                        row["close_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                        row["pnl_pct"]    = round(_pnl_te, 2)
+                        closed += 1
+                        print(f"  ⏰ WHALE_RIDE EXPIRED (no live price): {row['coin']} {_pnl_te:+.1f}% after {_hrs_te:.0f}h/{_mh_te}h")
+                        if _te_st == "WIN":
+                            new_wins.append(row)
+                except Exception:
+                    pass
+            continue  # skip price-dependent updates for all other cases
 
         try:
             entry = float(row["entry_price"])
@@ -1099,14 +1280,17 @@ def update_open_positions() -> None:
                     if not _already:
                         rows.append(_ms_record)
 
-            # Pre-milestone hard SL at -15%: if +25% was never hit, cap the loss
+            # Pre-milestone hard SL: -15% for standard, -10% for risky tier
             _is_principal_recovered = "PRINCIPAL_RECOVERED" in reasoning
-            if not _is_principal_recovered and pnl_pct <= -15.0:
+            _is_risky_tier = "[RISKY_TIER" in reasoning
+            _pre_sl_threshold = -10.0 if _is_risky_tier else -15.0
+            if not _is_principal_recovered and pnl_pct <= _pre_sl_threshold:
                 row["status"]     = "LOSS"
                 row["exit_price"] = round(usd, 6)
                 row["close_date"] = _now_str
                 closed += 1
-                print(f"  🛑 WHALE_RIDE -15% SL: {row['coin']} {pnl_pct:+.1f}% → LOSS (pre-milestone)")
+                _tier_label = "RISKY -10%" if _is_risky_tier else "STANDARD -15%"
+                print(f"  🛑 WHALE_RIDE {_tier_label} SL: {row['coin']} {pnl_pct:+.1f}% → LOSS (pre-milestone)")
                 continue
 
             # Close conditions (in priority order)
@@ -1154,21 +1338,23 @@ def update_open_positions() -> None:
 
         _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-        # TIME-BASED FORCE CLOSE: stale position → log as TIME EXIT or LOSS
-        # Tier 1: age >= 7 days AND pnl < +5%  (includes losses — position is going nowhere)
-        # Tier 2: age > 10 days AND pnl < +10% (keep winners running up to 10d)
+        # TIME-BASED FORCE CLOSE (v2.0 — tighter rules, cut losers faster)
+        # Tier 0: age >= 3d AND pnl <= -8%  → early loss cut, stop bleeding
+        # Tier 1: age >= 5d AND pnl <  +3%  → going nowhere, free the slot
+        # Tier 2: age >  8d AND pnl <  +7%  → keep only strong winners past 8d
         try:
             entry_dt  = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
             days_open = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 86400
-            _tier1 = days_open >= 7  and pnl_pct < 5.0
-            _tier2 = days_open > 10 and pnl_pct < 10.0
-            if _tier1 or _tier2:
+            _tier0 = days_open >= 3  and pnl_pct <= -8.0
+            _tier1 = days_open >= 5  and pnl_pct <   3.0
+            _tier2 = days_open >  8  and pnl_pct <   7.0
+            if _tier0 or _tier1 or _tier2:
                 _te_status = "LOSS" if pnl_pct < 0 else "TIME EXIT"
                 row["status"]     = _te_status
                 row["exit_price"] = round(usd, 6)
                 row["close_date"] = _now_str
                 closed += 1
-                _reason = "≥7d <+5%" if _tier1 else ">10d <+10%"
+                _reason = "≥3d <=-8% (early cut)" if _tier0 else ("≥5d <+3%" if _tier1 else ">8d <+7%")
                 print(f"  [TIME EXIT] {row['coin']} {pnl_pct:+.1f}% ({days_open:.0f}d) — {_reason}")
                 continue
         except Exception:
@@ -1527,6 +1713,112 @@ def print_daily_activity() -> None:
     print(f"  {'─'*46}")
 
 
+def print_scan_summary(
+    top10: list[dict] | None = None,
+    whale_rides: list[dict] | None = None,
+    fear_greed: dict | None = None,
+) -> None:
+    """
+    v2.0 clean end-of-scan summary.
+    Shows: open positions · top 10 scanner picks · open whale rides · top 10 whale suspects.
+    """
+    rows = _read()
+    _W = 54
+
+    try:
+        from src.connectors.coingecko import get_eur_usd_rate as _geur
+        _rate = _geur()
+    except Exception:
+        _rate = 0.92
+
+    def _pe(usd: float) -> str:
+        eur = usd * _rate
+        if eur >= 1:    return f"€{eur:,.2f}"
+        if eur >= 0.01: return f"€{eur:.4f}"
+        return f"€{eur:.8f}"
+
+    fg_val   = (fear_greed or {}).get("value", "?")
+    fg_label = (fear_greed or {}).get("label", "?")
+
+    print(f"\n  {'═'*_W}")
+    print(f"  SCAN SUMMARY  — F&G {fg_val}/100 ({fg_label})")
+    print(f"  {'═'*_W}")
+
+    # ── 1. Open positions ─────────────────────────────────────────────────
+    scanner_open = [
+        r for r in rows
+        if r.get("type", "SCANNER") in ("SCANNER", "")
+        and r.get("status") == "OPEN"
+    ]
+    print(f"\n  OPEN POSITIONS ({len(scanner_open)}/{_MAX_OPEN_SCANNER} slots used):")
+    if scanner_open:
+        for r in sorted(scanner_open, key=lambda x: x.get("date", ""), reverse=True):
+            try:
+                entry = float(r.get("entry_price") or 0)
+                curr  = float(r.get("current_price") or 0) or entry
+                pnl   = (curr - entry) / entry * 100 if entry > 0 else 0
+                entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - entry_dt).days
+                icon = "+" if pnl >= 0 else "-"
+                print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%  ({age}d)  entry {_pe(entry)}  now {_pe(curr)}")
+            except (ValueError, KeyError):
+                pass
+    else:
+        print("    (none)")
+
+    # ── 2. Top 10 scanner picks ───────────────────────────────────────────
+    print(f"\n  TOP 10 SCANNER PICKS:")
+    if top10:
+        for i, r in enumerate(top10[:10], 1):
+            sym   = r.get("symbol", "?")
+            score = r.get("score", 0)
+            ch24  = r.get("change_24h", 0)
+            rsi   = r.get("rsi")
+            macd  = r.get("macd", "?")
+            price = r.get("price", 0)
+            rsi_s = f"  RSI {rsi:.0f}" if rsi is not None else ""
+            arch  = f"  [{r['archetype']}]" if r.get("archetype") else ""
+            print(f"    {i:2}. {sym:8s}  score={score}  {_pe(price)}  24h={ch24:+.1f}%{rsi_s}  MACD={macd}{arch}")
+    else:
+        print("    (no scan results)")
+
+    # ── 3. Open whale rides ───────────────────────────────────────────────
+    whale_open = [
+        r for r in rows
+        if r.get("type") == "WHALE_RIDE" and r.get("status") == "OPEN"
+    ]
+    print(f"\n  OPEN WHALE RIDES ({len(whale_open)}):")
+    if whale_open:
+        for r in whale_open:
+            try:
+                entry = float(r.get("entry_price") or 0)
+                curr  = float(r.get("current_price") or 0) or entry
+                pnl   = (curr - entry) / entry * 100 if entry > 0 else 0
+                tier  = "[RISKY]" if "[RISKY_TIER" in r.get("reasoning", "") else ""
+                icon  = "+" if pnl >= 0 else "-"
+                print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%  {tier}  entry {_pe(entry)}  now {_pe(curr)}")
+            except (ValueError, KeyError):
+                pass
+    else:
+        print("    (none)")
+
+    # ── 4. Top 10 whale ride suspects ─────────────────────────────────────
+    print(f"\n  TOP 10 WHALE RIDE SUSPECTS:")
+    if whale_rides:
+        for i, wr in enumerate(whale_rides[:10], 1):
+            sym  = wr.get("symbol", "?")
+            tp   = wr.get("take_profit", 0)
+            sl   = wr.get("stop_loss", 0)
+            tier = wr.get("ride_tier", "standard")
+            tier_tag = " ⚡RISKY" if tier == "risky" else ""
+            crash = wr.get("crash_reason", "?")[:55]
+            print(f"    {i:2}. {sym:8s}{tier_tag}  TP {_pe(tp)} / SL {_pe(sl)}  — {crash}")
+    else:
+        print("    (none this scan)")
+
+    print(f"\n  {'═'*_W}")
+
+
 def print_track_record() -> None:
     """Print a P&L summary: PORTFOLIO · WATCHLIST · SCANNER PICKS."""
     rows = _read()
@@ -1731,20 +2023,25 @@ def print_track_record() -> None:
 
     open_scanner = [r for r in scanner_rows if r.get("status") == "OPEN"]
     if open_scanner:
+        try:
+            from src.connectors.coingecko import get_eur_usd_rate as _eur_rate_sc
+            _sc_rate = _eur_rate_sc()
+        except Exception:
+            _sc_rate = 0.88
         print(f"\n  OPEN POSITIONS:")
         for r in sorted(open_scanner, key=lambda x: x.get("date", ""), reverse=True):
             try:
-                pnl     = float(r.get("pnl_pct") or 0)
-                usd     = float(r.get("current_price") or 0)
-                eur_raw = r.get("price_eur", "")
-                eur     = float(eur_raw) if eur_raw else usd * 0.92
-                icon    = "+" if pnl >= 0 else "-"
+                entry_usd = float(r.get("entry_price") or 0)
+                usd       = float(r.get("current_price") or 0) or entry_usd
+                pnl       = (usd - entry_usd) / entry_usd * 100 if entry_usd > 0 else float(r.get("pnl_pct") or 0)
+                eur       = usd * _sc_rate
+                icon      = "+" if pnl >= 0 else "-"
                 entry_dt  = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                 days_open = (datetime.now(timezone.utc) - entry_dt).days
                 print(
                     f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
                     f"  ({days_open}d)"
-                    f"  entry {_usd_to_eur(float(r['entry_price']))}  now {_fmt(eur, usd)}"
+                    f"  entry {_usd_to_eur(entry_usd)}  now {_fmt(eur, usd)}"
                 )
             except (ValueError, KeyError):
                 pass
@@ -1870,14 +2167,19 @@ def print_track_record() -> None:
 
         open_wr = [r for r in whale_rows if r.get("status") == "OPEN"]
         if open_wr:
+            try:
+                from src.connectors.coingecko import get_eur_usd_rate as _eur_rate_wr
+                _wr_rate = _eur_rate_wr()
+            except Exception:
+                _wr_rate = 0.88
             print(f"\n  OPEN WHALE RIDES:")
             import re as _re2
             for r in open_wr:
                 try:
-                    pnl       = float(r.get("pnl_pct") or 0)
-                    usd       = float(r.get("current_price") or 0)
-                    eur_raw   = r.get("price_eur", "")
-                    eur       = float(eur_raw) if eur_raw else usd * 0.92
+                    entry_usd = float(r.get("entry_price") or 0)
+                    usd       = float(r.get("current_price") or 0) or entry_usd
+                    pnl       = (usd - entry_usd) / entry_usd * 100 if entry_usd > 0 else float(r.get("pnl_pct") or 0)
+                    eur       = usd * _wr_rate
                     icon      = "+" if pnl >= 0 else "-"
                     reasoning = r.get("reasoning", "")
                     entry_dt  = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)

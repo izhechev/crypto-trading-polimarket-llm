@@ -109,9 +109,9 @@ def analyze_with_groq(
         # 0F: no momentum — skip if no Archetype A carve-out (RSI >= 42)
         elif ch24 < 2.0 and rsi >= 42:
             reason = f"24h {ch24:+.1f}% < +2% and RSI {rsi:.1f} ≥ 42 (no momentum)"
-        # 0G: minimum score
-        elif score <= 1:
-            reason = f"score={score} (too low)"
+        # 0G: minimum score — v2.0 requires ≥ 3 (was > 1)
+        elif score <= 2:
+            reason = f"score={score} (too low, need ≥3)"
         # 0H: already open
         elif sym in _open_set:
             reason = "already OPEN"
@@ -278,10 +278,13 @@ RULE 4 — BASE SCORE TIE-BREAK:
   When effective scores are equal after Rules 1–3, prefer higher vol/mcap.
   → Assign qualifier="BASE_SCORE".
 
-CONFIDENCE TIERS (apply after ranking):
-- HIGH:   Rule 1 or (Rule 2 + quality setup) → aggressive BUY, TP 1.30x, SL 0.85x
-- MEDIUM: Rule 2 alone or Rule 3 → cautious BUY, TP 1.20x, SL 0.88x
-- LOW:    Rule 4 only, no catalyst → TP 1.15x, SL 0.90x
+CONFIDENCE TIERS (apply after ranking) — MINIMUM 2.5:1 RISK:REWARD ENFORCED:
+- HIGH:   Rule 1 or (Rule 2 + quality setup) → aggressive BUY, TP 1.40x, SL 0.88x  (R:R ≈ 3.3:1)
+- MEDIUM: Rule 2 alone or Rule 3 → cautious BUY, TP 1.28x, SL 0.90x               (R:R ≈ 2.8:1)
+- LOW:    Rule 4 only, no catalyst → TP 1.20x, SL 0.92x — ADVISORY ONLY, no real entry  (R:R ≈ 2.5:1)
+
+CRITICAL: LOW confidence = advisory only. Mark "advisory_only": true for LOW confidence picks.
+NEVER set TP closer than 1.20x or SL tighter than 0.92x — minimum R:R is 2.5:1 always.
 
 High ATH drop (95%+) is NOT a reason to avoid — it is a SETUP. ATL coins with vol and catalysts are prime bounces.
 
@@ -304,7 +307,8 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
       "catalyst_type": "regulatory|tech_upgrade|partnership|narrative|institutional|token_economics|none",
       "catalyst_timing": "upcoming|just_happened|old_news|none",
       "setup_quality": "coiled_spring|accumulation|oversold_only|none",
-      "pump_assessment": "brief assessment of pump alerts, or null if none"
+      "pump_assessment": "brief assessment of pump alerts, or null if none",
+      "advisory_only": false
     }}
   ]
 }}"""
@@ -445,37 +449,33 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
             _pick["entry_price"] = _price_map[_sym]
             print(f"  [entry_price] {_sym}: backfilled from scanner (Groq returned null)")
 
+    from src.connectors.coingecko import get_eur_usd_rate as _groq_eur_rate
+    _groq_eur = _groq_eur_rate()
+
     def _fmt(val):
         if not isinstance(val, (int, float)):
             return str(val)
-        if val == 0:
-            return "$0"
-        if val >= 1:
-            return f"${val:,.2f}"
-        if val >= 0.01:
-            return f"${val:.4f}"
-        return f"${val:.8f}"
+        v = val * _groq_eur
+        if v == 0:   return "€0"
+        if v >= 1:   return f"€{v:,.2f}"
+        if v >= 0.01: return f"€{v:.4f}"
+        return f"€{v:.8f}"
 
     def _apply_guards(rec: dict) -> dict:
         """Apply TP cap, RSI guard, and F&G filter to a single pick. Mutates in place."""
-        # ── Hard TP cap based on Fear & Greed ──
+        # ── Hard TP cap — only in Extreme Fear (< 20) ──
         try:
             entry = float(rec.get("entry_price") or 0)
             tp    = float(rec.get("take_profit") or 0)
-            if entry > 0 and tp > 0:
-                if fg_value < 20:
-                    max_gain, cap_label = 0.10, "extreme fear cap (+10%)"
-                elif fg_value < 35:
-                    max_gain, cap_label = 0.15, "fear cap (+15%)"
-                else:
-                    max_gain, cap_label = None, ""
-                if max_gain is not None:
-                    max_tp = round(entry * (1 + max_gain), 8)
-                    if tp > max_tp:
-                        print(f"  ⚠️  TP capped {tp:.4f} → {max_tp:.4f} [{cap_label}]")
-                        rec["take_profit"] = max_tp
-                        rec["reasoning"] = (rec.get("reasoning", "") +
-                            f" [TP reduced to {max_gain*100:.0f}% — {cap_label}]")
+            if entry > 0 and tp > 0 and fg_value < 20:
+                max_gain  = 0.25
+                cap_label = "extreme fear cap (+25%)"
+                max_tp = round(entry * (1 + max_gain), 8)
+                if tp > max_tp:
+                    print(f"  ⚠️  TP capped {tp:.4f} → {max_tp:.4f} [{cap_label}]")
+                    rec["take_profit"] = max_tp
+                    rec["reasoning"] = (rec.get("reasoning", "") +
+                        f" [TP reduced to {max_gain*100:.0f}% — {cap_label}]")
         except (TypeError, ValueError):
             pass
 
@@ -520,15 +520,37 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
     # Apply guards to all picks
     guarded = [_apply_guards(r) for r in raw_picks[:3]]
 
-    # DATA COLLECTION MODE: all confidence levels allowed regardless of F&G
-    filtered = guarded
+    # v2.0: enforce minimum 2.5:1 R:R on every pick; mark LOW confidence as advisory only
+    for _g in guarded:
+        try:
+            _ep = float(_g.get("entry_price") or 0)
+            _sl = float(_g.get("stop_loss")   or 0)
+            _tp = float(_g.get("take_profit") or 0)
+            if _ep > 0 and _sl > 0 and _tp > 0:
+                _risk   = _ep - _sl
+                _reward = _tp - _ep
+                if _risk > 0 and _reward / _risk < 2.5:
+                    _new_tp = round(_ep + _risk * 2.5, 8)
+                    print(f"  ⚠️  R:R fix: {_g.get('coin')} TP {_tp:.6f} → {_new_tp:.6f} (enforcing 2.5:1)")
+                    _g["take_profit"] = _new_tp
+        except (TypeError, ValueError):
+            pass
+        if ((_g.get("confidence") or "").lower() == "low"
+                or _g.get("advisory_only")):
+            _g["advisory_only"] = True
+
+    # Only HIGH and MEDIUM confidence create real entries; LOW is advisory only
+    actionable = [r for r in guarded if not r.get("advisory_only")]
+    advisory   = [r for r in guarded if r.get("advisory_only")]
+    filtered   = guarded  # display all; entry logic uses actionable subset
     if not filtered:
         print(f"  ⛔  NO BUY — no picks returned from Groq")
         return None, groq_candidates
 
     # ── Display TOP N BUYS ──
-    n = len(filtered)
-    label = f"TOP {n} BUY{'S' if n != 1 else ''}"
+    n = len(actionable)
+    n_adv = len(advisory)
+    label = f"TOP {n} BUY{'S' if n != 1 else ''}" + (f" + {n_adv} ADVISORY" if n_adv else "")
     print("\n" + "=" * 60)
     print(f"  GROQ LLM RECOMMENDATION — {label}")
     print("=" * 60)
@@ -540,11 +562,11 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
         sl  = rec.get("stop_loss")
         tp  = rec.get("take_profit")
         tf  = rec.get("timeframe", "?")
-        caution_tag = ""
+        adv_tag = "  [ADVISORY ONLY — no entry]" if rec.get("advisory_only") else ""
         sltp = f"  Entry {_fmt(ep)}, SL {_fmt(sl)}, TP {_fmt(tp)}" if ep else ""
         qualifier  = rec.get("qualifier", "")
         key_signal = rec.get("key_signal", "")
-        print(f"\n  {i}. {coin_pick:<8s} {conf_icon} {confidence} confidence  [{rec.get('quality_label','?')}]{sltp}{caution_tag}")
+        print(f"\n  {i}. {coin_pick:<8s} {conf_icon} {confidence} confidence  [{rec.get('quality_label','?')}]{sltp}{adv_tag}")
         if qualifier:
             print(f"     Qualifier: {qualifier}  |  {key_signal[:80]}" if key_signal else f"     Qualifier: {qualifier}")
         print(f"     Timeframe: {tf}")
@@ -557,11 +579,14 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
             print(f"     Pump:      {rec['pump_assessment'][:100]}")
     print("=" * 60)
 
-    # ── Web research validation on pick #1 only ──
-    filtered[0] = _validate_with_web_research(filtered[0], top10, client,
-                                               groq_candidates=groq_candidates)
+    # ── Web research validation on pick #1 (actionable only) ──
+    if actionable:
+        actionable[0] = _validate_with_web_research(actionable[0], top10, client,
+                                                     groq_candidates=groq_candidates)
+        filtered[0] = actionable[0]
 
-    return filtered, groq_candidates
+    # Return only actionable picks for logging; advisory ones are informational only
+    return actionable if actionable else None, groq_candidates
 
 
 def _validate_with_web_research(

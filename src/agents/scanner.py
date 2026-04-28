@@ -799,8 +799,11 @@ def _build_approaching_tp_set(current_prices: dict[str, float], threshold_pct: f
 
 PUMP_WATCHLIST_PATH = config.DATA_DIR / "pump_watchlist.json"
 # Position sizing for auto whale ride entries
-WHALE_RIDE_MAX_EUR  = 16.0   # max € per position (portfolio / 5)
-WHALE_CRASH_TRIGGER = 0.60   # require >60% crash from pump peak before entry
+WHALE_RIDE_MAX_EUR       = 16.0   # max € per position (portfolio / 5)
+WHALE_CRASH_TRIGGER      = 0.60   # >60% crash from peak → standard whale ride (TP +100%, SL -15%)
+WHALE_CRASH_RISKY_MIN    = 0.40   # 40-60% crash → risky ride (TP +50%, SL -10%)
+WHALE_CRASH_RISKY_MAX    = 0.60
+WHALE_RISKY_MAX_MCAP_USD = 50_000_000   # only for coins < $50M mcap (high volatility tier)
 
 
 def _load_pump_watchlist() -> dict:
@@ -944,11 +947,14 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
             continue
 
         drop_from_peak = (current - peak) / peak  # negative value
-        if drop_from_peak <= -WHALE_CRASH_TRIGGER:
+        abs_drop = abs(drop_from_peak)
+        mcap = coin.get("market_cap") or 0
+
+        if abs_drop >= WHALE_CRASH_TRIGGER:
+            # Standard whale ride: >60% crash, TP +100%, SL -15%
             prev_trades = _get_previous_closed_trades(sym)
             prev_wins   = [t for t in prev_trades if t.get("status") == "WIN"]
             known_cycles = [f"{float(t['pnl_pct']):+.0f}%" for t in prev_wins if t.get("pnl_pct")]
-
             auto_rides.append({
                 "symbol":         sym,
                 "name":           entry.get("name", sym),
@@ -957,7 +963,7 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
                 "entry":          current,
                 "stop_loss":      round(current * 0.85, 8),   # -15% pre-milestone
                 "take_profit":    round(current * 2.00, 8),   # +100%
-                "crash_reason":   f"pump {entry.get('peak_7d', 0):+.0f}% → crash {drop_from_peak*100:.0f}% from peak",
+                "crash_reason":   f"pump {entry.get('peak_7d', 0):+.0f}% → crash {abs_drop*100:.0f}% from peak",
                 "max_hold_hours": 48,
                 "is_serial_scam": False,
                 "allies":         [],
@@ -969,6 +975,37 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
                 "max_eur":        WHALE_RIDE_MAX_EUR,
                 "entry_type":     "auto_watchlist",
                 "drop_from_peak": round(drop_from_peak * 100, 1),
+                "ride_tier":      "standard",
+            })
+            triggered.append(sym)
+
+        elif (WHALE_CRASH_RISKY_MIN <= abs_drop < WHALE_CRASH_RISKY_MAX
+              and mcap > 0 and mcap < WHALE_RISKY_MAX_MCAP_USD):
+            # Risky whale ride: 40-60% crash on small-cap, TP +50%, SL -10%
+            prev_trades = _get_previous_closed_trades(sym)
+            prev_wins   = [t for t in prev_trades if t.get("status") == "WIN"]
+            known_cycles = [f"{float(t['pnl_pct']):+.0f}%" for t in prev_wins if t.get("pnl_pct")]
+            auto_rides.append({
+                "symbol":         sym,
+                "name":           entry.get("name", sym),
+                "coin_id":        coin.get("id", ""),
+                "price":          current,
+                "entry":          current,
+                "stop_loss":      round(current * 0.90, 8),   # -10% tight SL
+                "take_profit":    round(current * 1.50, 8),   # +50% TP
+                "crash_reason":   f"partial crash {abs_drop*100:.0f}% from peak (risky ride)",
+                "max_hold_hours": 24,
+                "is_serial_scam": False,
+                "allies":         [],
+                "known_cycles":   known_cycles,
+                "cycle_number":   len(prev_trades) + 1,
+                "prev_wins":      prev_wins,
+                "change_24h":     coin.get("price_change_percentage_24h") or 0,
+                "change_7d":      coin.get("price_change_percentage_7d_in_currency") or 0,
+                "max_eur":        WHALE_RIDE_MAX_EUR / 2,   # half size for risky tier
+                "entry_type":     "auto_watchlist_risky",
+                "drop_from_peak": round(drop_from_peak * 100, 1),
+                "ride_tier":      "risky",
             })
             triggered.append(sym)
 
@@ -1412,7 +1449,7 @@ def run_smart_scanner(
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
         try:
-            ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
+            ohlcv = _fetch_ohlcv_for_coin(coin, days=60)
             if not ohlcv or len(ohlcv) < 20:
                 continue
 
@@ -1528,6 +1565,14 @@ def run_smart_scanner(
                 print(f"  ❌ SKIP {symbol}: full bearish alignment (MACD+Trend BEARISH, 7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
                 continue
 
+            # Gate: extreme fear (F&G < 30) + no MACD bullish = 49% loss rate (data-driven)
+            # Require MACD bullish confirmation when market is in extreme fear — neutral/bearish
+            # MACD in fear means no momentum confirmation and historically near coin-flip losses.
+            if fg_value < 30 and ta.macd_signal != "BULLISH":
+                _write_shadow_log(symbol, 0, f"extreme fear gate (F&G={fg_value}, MACD={ta.macd_signal})")
+                print(f"  ❌ SKIP {symbol}: F&G {fg_value} (extreme fear) — MACD {ta.macd_signal}, not bullish")
+                continue
+
             # Momentum stall flag: MACD bearish + trend neutral → cap score at 2
             # (MACD bearish and trend penalties already counted in _ta_score / _catalyst_score)
             _stall_reason: list[str] = []
@@ -1569,11 +1614,9 @@ def run_smart_scanner(
             if raw_score <= 0:
                 continue
 
-            # Score 1 → shadow log AND include in top10 display as context
-            # (Groq pre-filter Step 0G blocks these from becoming new entries;
-            # showing them lets the user see the full market picture)
-            if raw_score == 1:
-                _write_shadow_log(symbol, raw_score, "score=1 (display only, no entry)")
+            # Scores 1-2 → shadow log only; Groq pre-filter (Step 0G) blocks entries for score ≤ 2
+            if raw_score <= 2:
+                _write_shadow_log(symbol, raw_score, f"score={raw_score} (display only, need ≥3 for entry)")
 
             # Momentum stall cap: MACD bearish + trend neutral → score capped at 2
             if momentum_stall and raw_score > 2:
@@ -1854,17 +1897,29 @@ def run_smart_scanner(
     if auto_watchlist_rides:
         print(f"\n  🐋  AUTO WHALE RIDE — crash triggered from watchlist\n" + "-" * 60)
         for wr in auto_watchlist_rides:
-            sym  = wr["symbol"]
-            p    = wr["price"]
-            sl   = wr["stop_loss"]
-            tp   = wr["take_profit"]
-            drop = wr.get("drop_from_peak", 0)
+            sym   = wr["symbol"]
+            p     = wr["price"]
+            sl    = wr["stop_loss"]
+            tp    = wr["take_profit"]
+            drop  = wr.get("drop_from_peak", 0)
+            tier  = wr.get("ride_tier", "standard")
             cycles_str = " → ".join(wr["known_cycles"]) if wr["known_cycles"] else "first recorded"
-            print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p * _eur)}  (crashed {drop:.0f}% from pump peak)")
-            print(f"     Entry: {_pfmt(p * _eur)} | SL: {_pfmt(sl * _eur)} (-15% pre-milestone) | TP: {_pfmt(tp * _eur)} (+100%)")
-            print(f"     Max hold: 48h | Max position: €{WHALE_RIDE_MAX_EUR:.0f}")
-            print(f"     Pattern: {cycles_str}")
-            print(f"     Reason: {wr['crash_reason']}")
+            if tier == "risky":
+                sl_pct = "-10%"
+                tp_pct = "+50%"
+                max_eur = wr.get("max_eur", WHALE_RIDE_MAX_EUR / 2)
+                hold_h  = wr.get("max_hold_hours", 24)
+                print(f"\n  ⚡ RISKY WHALE RIDE: {sym} {_pfmt(p * _eur)}  (partial crash {abs(drop):.0f}% from peak)")
+                print(f"     Entry: {_pfmt(p * _eur)} | SL: {_pfmt(sl * _eur)} ({sl_pct}) | TP: {_pfmt(tp * _eur)} ({tp_pct})")
+                print(f"     Max hold: {hold_h}h | Max position: €{max_eur:.0f} (HALF SIZE — high risk)")
+                print(f"     Pattern: {cycles_str}")
+                print(f"     Reason: {wr['crash_reason']}")
+            else:
+                print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p * _eur)}  (crashed {abs(drop):.0f}% from pump peak)")
+                print(f"     Entry: {_pfmt(p * _eur)} | SL: {_pfmt(sl * _eur)} (-15% pre-milestone) | TP: {_pfmt(tp * _eur)} (+100%)")
+                print(f"     Max hold: 48h | Max position: €{WHALE_RIDE_MAX_EUR:.0f}")
+                print(f"     Pattern: {cycles_str}")
+                print(f"     Reason: {wr['crash_reason']}")
 
     all_rug_display = rug_pull_coins
     if all_rug_display:
@@ -1926,4 +1981,66 @@ def run_smart_scanner(
     except Exception as _wr_e:
         print(f"  ⚠️  Whale rider module error: {_wr_e}")
 
+    # ── Telegram summary: top 10 buys + top 10 whale ride suspects ────────
+    try:
+        _send_telegram_top10(top10, all_whale_rides, fear_greed)
+    except Exception as _tg_e:
+        print(f"  ⚠️  Telegram top-10 summary failed: {_tg_e}")
+
     return top10, pump_coins, all_whale_rides, quality_count, _catalysts
+
+
+def _send_telegram_top10(
+    top10: list[dict],
+    whale_rides: list[dict],
+    fear_greed: dict,
+) -> None:
+    """Send top-10 scanner picks and top-10 whale ride suspects to Telegram."""
+    from src.utils.telegram import send_telegram
+
+    try:
+        from src.connectors.coingecko import get_eur_usd_rate as _get_eur_rate
+        _eur = _get_eur_rate()
+    except Exception:
+        _eur = 0.92
+
+    def _pfmt(p: float) -> str:
+        if p == 0:    return "€0"
+        if p >= 1:    return f"€{p:,.2f}"
+        if p >= 0.01: return f"€{p:.4f}"
+        return f"€{p:.8f}"
+
+    fg_val   = (fear_greed or {}).get("value", 50)
+    fg_label = (fear_greed or {}).get("label", "?")
+    lines_scanner = [f"<b>🔍 TOP 10 SCANNER PICKS — F&amp;G {fg_val}/100 ({fg_label})</b>\n"]
+    for i, r in enumerate(top10[:10], 1):
+        sym   = r.get("symbol", "?")
+        score = r.get("score", 0)
+        ch24  = r.get("change_24h", 0)
+        rsi   = r.get("rsi")
+        macd  = r.get("macd", "?")
+        price = r.get("price", 0) * _eur
+        rsi_s = f" RSI {rsi:.0f}" if rsi is not None else ""
+        lines_scanner.append(
+            f"  {i}. <b>{sym}</b> {_pfmt(price)}  score={score}  24h={ch24:+.1f}%{rsi_s}  MACD={macd}"
+        )
+
+    lines_whale = ["\n<b>🐋 TOP WHALE RIDE SUSPECTS</b>\n"]
+    wr_shown = whale_rides[:10]
+    if wr_shown:
+        for wr in wr_shown:
+            sym   = wr.get("symbol", "?")
+            tier  = wr.get("ride_tier", "standard")
+            tp    = wr.get("take_profit", 0) * _eur
+            sl    = wr.get("stop_loss", 0) * _eur
+            crash = wr.get("crash_reason", "?")[:60]
+            tier_tag = " ⚡ RISKY" if tier == "risky" else ""
+            lines_whale.append(
+                f"  🐋 <b>{sym}</b>{tier_tag}  TP {_pfmt(tp)} / SL {_pfmt(sl)}\n"
+                f"     {crash}"
+            )
+    else:
+        lines_whale.append("  No whale ride suspects this scan.")
+
+    msg = "\n".join(lines_scanner) + "\n".join(lines_whale)
+    send_telegram(msg)
