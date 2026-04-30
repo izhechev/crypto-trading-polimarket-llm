@@ -5,18 +5,25 @@ from datetime import datetime
 from tenacity import retry, wait_exponential, stop_after_attempt
 from src.models.crypto import CryptoPrice
 
-# Simple in-memory cache — 60 min TTL matches the hourly scan cycle.
-# Whale check runs every 15 min but fetches its own coin list; these
-# caches cover fetch_prices / fetch_ohlcv / fetch_fear_greed calls.
+# Simple in-memory cache — 60 min TTL for OHLCV/F&G; 5 min for live prices.
 _cache: dict[str, tuple[float, any]] = {}
-CACHE_TTL = 3600  # 60 minutes
+CACHE_TTL       = 3600  # 60 minutes — OHLCV, Fear & Greed, EUR rate
+PRICE_CACHE_TTL = 300   # 5 minutes  — live prices (fetch_prices, fetch_simple_usd)
 
 # Stale cache: stores the last successful fetch indefinitely.
 # Used as fallback when live fetch fails (429 / network error).
 _stale_cache: dict[str, any] = {}
+_stale_cache_ts: dict[str, float] = {}  # tracks when each stale entry was written
 
 # ── CoinGecko call counter (real HTTP requests only, cache hits excluded) ──
 _CG_CALLS: int = 0
+
+# Set to True when a 429 monthly-quota response is received so all subsequent
+# OHLCV calls skip the CG request immediately instead of retrying.
+_CG_OHLCV_QUOTA_EXHAUSTED: bool = False
+
+# Session-level search cache: symbol → CoinGecko ID (empty string = confirmed not found)
+_cg_search_cache: dict[str, str] = {}
 
 
 def _cg_get(client: httpx.Client, url: str, **kwargs) -> httpx.Response:
@@ -35,24 +42,26 @@ def reset_cg_call_count() -> None:
     _CG_CALLS = 0
 
 
-def _get_cached(key: str):
+def _get_cached(key: str, ttl: int | None = None):
     if key in _cache:
         ts, data = _cache[key]
-        if time.time() - ts < CACHE_TTL:
+        if time.time() - ts < (ttl or CACHE_TTL):
             return data
     return None
 
 
 def _set_cache(key: str, data):
-    _cache[key] = (time.time(), data)
+    now = time.time()
+    _cache[key] = (now, data)
     _stale_cache[key] = data
+    _stale_cache_ts[key] = now
 
 
 def _headers() -> dict:
     try:
         import config
         if config.COINGECKO_API_KEY:
-            return {"x-cg-demo-api-key": config.COINGECKO_API_KEY}
+            return {"x-cg-pro-api-key": config.COINGECKO_API_KEY}
     except Exception:
         pass
     return {}
@@ -71,7 +80,7 @@ def get_eur_usd_rate() -> float:
     try:
         with httpx.Client(timeout=10) as client:
             resp = client.get(
-                "https://api.coingecko.com/api/v3/simple/price",
+                "https://pro-api.coingecko.com/api/v3/simple/price",
                 params={"ids": "tether", "vs_currencies": "eur"},
                 headers=_headers(),
                 timeout=10,
@@ -94,12 +103,12 @@ def _fetch_eur_prices(coin_ids: list[str]) -> dict[str, float]:
     Returns {coin_id: eur_price}. Falls back to empty dict on failure.
     """
     cache_key = f"eur_simple_{'_'.join(sorted(coin_ids))}"
-    cached = _get_cached(cache_key)
+    cached = _get_cached(cache_key, ttl=PRICE_CACHE_TTL)
     if cached is not None:
         return cached
 
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price"
+        url = "https://pro-api.coingecko.com/api/v3/simple/price"
         params = {"ids": ",".join(coin_ids), "vs_currencies": "eur"}
         with httpx.Client(timeout=15) as client:
             resp = _cg_get(client, url, params=params, headers=_headers())
@@ -121,11 +130,11 @@ def fetch_simple_usd(coin_ids: list[str]) -> dict[str, float]:
     if not coin_ids:
         return {}
     cache_key = f"usd_simple_{'_'.join(sorted(coin_ids))}"
-    cached = _get_cached(cache_key)
+    cached = _get_cached(cache_key, ttl=PRICE_CACHE_TTL)
     if cached is not None:
         return cached
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price"
+        url = "https://pro-api.coingecko.com/api/v3/simple/price"
         params = {"ids": ",".join(coin_ids), "vs_currencies": "usd"}
         with httpx.Client(timeout=15) as client:
             resp = _cg_get(client, url, params=params, headers=_headers())
@@ -141,7 +150,7 @@ def fetch_simple_usd(coin_ids: list[str]) -> dict[str, float]:
 def fetch_prices(coin_ids: list[str]) -> list[CryptoPrice]:
     """Fetch USD market data + real EUR prices for multiple coins."""
     cache_key = f"prices_usd_{'_'.join(sorted(coin_ids))}"
-    cached = _get_cached(cache_key)
+    cached = _get_cached(cache_key, ttl=PRICE_CACHE_TTL)
     if cached:
         return cached
 
@@ -150,7 +159,8 @@ def fetch_prices(coin_ids: list[str]) -> list[CryptoPrice]:
     except Exception as e:
         stale = _stale_cache.get(cache_key)
         if stale:
-            print(f"  [CG cache] using stale prices ({len(stale)} coins) — live fetch failed: {type(e).__name__}")
+            stale_age_h = (time.time() - _stale_cache_ts.get(cache_key, time.time())) / 3600
+            print(f"  [CG cache] using stale prices ({len(stale)} coins, {stale_age_h:.1f}h old) — live fetch failed: {type(e).__name__}")
             return stale
         raise
 
@@ -158,7 +168,7 @@ def fetch_prices(coin_ids: list[str]) -> list[CryptoPrice]:
 @retry(wait=wait_exponential(min=4, max=60), stop=stop_after_attempt(4))
 def _fetch_prices_live(coin_ids: list[str], cache_key: str) -> list[CryptoPrice]:
     ids_str = ",".join(coin_ids)
-    url = "https://api.coingecko.com/api/v3/coins/markets"
+    url = "https://pro-api.coingecko.com/api/v3/coins/markets"
     params = {
         "vs_currency": "usd",
         "ids": ids_str,
@@ -199,8 +209,35 @@ def _fetch_prices_live(coin_ids: list[str], cache_key: str) -> list[CryptoPrice]
     return prices
 
 
+def search_cg_id(symbol: str) -> str:
+    """
+    Find the CoinGecko coin ID for a symbol using the /search endpoint.
+    Returns empty string if not found. Results are cached for the session.
+    """
+    sym = symbol.upper()
+    if sym in _cg_search_cache:
+        return _cg_search_cache[sym]
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = _cg_get(client,
+                "https://pro-api.coingecko.com/api/v3/search",
+                params={"query": sym},
+                headers=_headers(),
+            )
+        coins = resp.json().get("coins", [])
+        match = next((c for c in coins if (c.get("symbol") or "").upper() == sym), None)
+        cg_id = match["id"] if match else ""
+    except Exception:
+        cg_id = ""
+    _cg_search_cache[sym] = cg_id
+    return cg_id
+
+
 def fetch_ohlcv(coin_id: str, days: int = 30) -> list[dict]:
     """Fetch OHLCV data for technical analysis."""
+    global _CG_OHLCV_QUOTA_EXHAUSTED
+    if _CG_OHLCV_QUOTA_EXHAUSTED:
+        return []
     cache_key = f"ohlcv_{coin_id}_{days}"
     cached = _get_cached(cache_key)
     if cached:
@@ -212,15 +249,32 @@ def fetch_ohlcv(coin_id: str, days: int = 30) -> list[dict]:
         return stale if stale else []
 
 
+_OHLC_VALID_DAYS = (1, 7, 14, 30, 90, 180, 365)
+
+
+def _snap_days(days: int) -> int:
+    """Round up to the nearest value accepted by the pro /ohlc endpoint."""
+    for v in _OHLC_VALID_DAYS:
+        if days <= v:
+            return v
+    return 365
+
+
 @retry(wait=wait_exponential(min=4, max=60), stop=stop_after_attempt(4))
 def _fetch_ohlcv_live(coin_id: str, days: int, cache_key: str) -> list[dict]:
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    params = {"vs_currency": "usd", "days": str(days)}
+    global _CG_OHLCV_QUOTA_EXHAUSTED
+    url = f"https://pro-api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    params = {"vs_currency": "usd", "days": str(_snap_days(days))}
 
     with httpx.Client(timeout=30) as client:
         resp = _cg_get(client, url, params=params, headers=_headers())
-        resp.raise_for_status()
-        data = resp.json()
+
+    if resp.status_code == 429:
+        _CG_OHLCV_QUOTA_EXHAUSTED = True
+        return []
+
+    resp.raise_for_status()
+    data = resp.json()
 
     ohlcv = []
     for candle in data:

@@ -18,8 +18,9 @@ _BASE = "https://api.coinpaprika.com/v1"
 _cache: dict = {}        # events cache — 1 hour
 _scan_cache: dict = {}   # scanner/OHLCV cache — 4 min
 
-_CACHE_TTL      = 3600  # 1 hour (events)
-_SCAN_CACHE_TTL = 240   # 4 min  (tickers + OHLCV)
+_CACHE_TTL          = 3600   # 1 hour  (events)
+_SCAN_CACHE_TTL     = 240    # 4 min   (OHLCV — needs to be fresh for TA)
+_TICKER_CACHE_TTL   = 21600  # 6 hours (full coin list — structure rarely changes)
 
 # CoinGecko ID map cache — built dynamically from top-500 CG coins (24h TTL)
 _cg_id_map: dict[str, str] = {}
@@ -54,10 +55,10 @@ def _set_cache(key, data):
     _cache[key] = (time.time(), data)
 
 
-def _cached_scan(key):
+def _cached_scan(key, ttl: int | None = None):
     if key in _scan_cache:
         ts, data = _scan_cache[key]
-        if time.time() - ts < _SCAN_CACHE_TTL:
+        if time.time() - ts < (ttl or _SCAN_CACHE_TTL):
             return data
     return None
 
@@ -214,6 +215,143 @@ SYMBOL_TO_CG_ID: dict[str, str] = {
     "HYPE":   "hyperliquid",
     "S":      "sonic-3",
     "VIRTUAL":"virtual-protocol",
+    "ORCA":   "orca",
+    "BRETT":  "brett",
+    "FARTCOIN":"fartcoin",
+    "AERO":   "aerodrome-finance",
+    "POPCAT": "popcat",
+    "SAFE":   "safe-global",
+    "IP":     "story-protocol",
+    "RAY":    "raydium",
+    "TRUMP":  "official-trump",
+    "PENGU":  "pudgy-penguins",
+    "ZRO":    "layerzero",
+    "JTO":    "jito-governance-token",
+    "BONK":   "bonk",
+    "RUNE":   "thorchain",
+    "RSR":    "reserve-rights-token",
+    "LUNC":   "terra-luna",
+    "WLD":    "worldcoin-wld",
+    "INJ":    "injective-protocol",
+    "OP":     "optimism",
+    "FIL":    "filecoin",
+    "LDO":    "lido-dao",
+    "PEPE":   "pepe",
+    "SAND":   "the-sandbox",
+    "GALA":   "gala",
+    "DGB":    "digibyte",
+    "ZEN":    "horizen",
+    "RED":    "redstone",
+    "AXL":    "axelar",
+    "LINEA":  "linea",
+    "CYS":    "cysic",
+    # Oracle / infrastructure
+    "API3":   "api3",
+    "BAND":   "band-protocol",
+    "TRB":    "tellor",
+    "UMA":    "uma",
+    "DIA":    "dia-data",
+    # DeFi
+    "SUSHI":  "sushi",
+    "1INCH":  "1inch",
+    "CAKE":   "pancakeswap-token",
+    "BAL":    "balancer",
+    "CVX":    "convex-finance",
+    "FXS":    "frax-share",
+    "SPELL":  "spell-token",
+    "ICX":    "icon",
+    "KSM":    "kusama",
+    "SCRT":   "secret",
+    "EGLD":   "elrond-erd-2",
+    "CKB":    "nervos-network",
+    "WAVES":  "waves",
+    "NEO":    "neo",
+    "EOS":    "eos",
+    "XDC":    "xdce-crowd-sale",
+    "IOST":   "iostoken",
+    "XNO":    "nano",
+    "QTUM":   "qtum",
+    "ZKP":    "panther-protocol",
+    "PRL":    "oyster-pearl",
+    "SIREN":  "siren",
+    "MINA":   "mina-protocol",
+    "GLMR":   "moonbeam",
+    "MOVR":   "moonriver",
+    "ANKR":   "ankr",
+    "CLV":    "clover-finance",
+    "LOKA":   "league-of-kingdoms",
+    "DUSK":   "dusk-network",
+    "ALICE":  "my-neighbor-alice",
+    "AUCTION":"bounce-token",
+    "POLS":   "polkastarter",
+    "TORN":   "tornado-cash",
+    "INDEX":  "index-cooperative",
+    "BADGER": "badger-dao",
+    "ALPHA":  "alpha-finance",
+    "PERP":   "perpetual-protocol",
+    "DODO":   "dodo",
+    "MDX":    "mdex",
+    "BAKE":   "bakerytoken",
+    "XVS":    "venus",
+    "TWT":    "trust-wallet-token",
+    "CHESS":  "tranchess",
+    "AUTO":   "auto",
+    "QNT":    "quant-network",
+    "CTSI":   "cartesi",
+    "NMR":    "numeraire",
+    "MLN":    "melon",
+    "PROM":   "prometeus",
+    "LINA":   "linear",
+    "BEL":    "bella-protocol",
+    "WING":   "wing-finance",
+    "DEGO":   "dego-finance",
+    "SFP":    "safepal",
+    "XVG":    "verge",
+    "REN":    "republic-protocol",
+    "STORJ":  "storj",
+    "OXT":    "orchid-protocol",
+    "NKN":    "nkn",
+    "COTI":   "coti",
+    "KEEP":   "keep-network",
+    "NU":     "nucypher",
+    "RLC":    "iexec-rlc",
+    "OGN":    "origin-protocol",
+    "LRC":    "loopring",
+    "STMX":   "storm",
+    "NULS":   "nuls",
+    "WAN":    "wanchain",
+    "HIVE":   "hive",
+    "STEEM":  "steem",
+    "LSK":    "lisk",
+    "ARK":    "ark",
+    "MBOX":   "mobox",
+    # Meme / trending
+    "BOME":   "book-of-meme",
+    "MOODENG":"moo-deng",
+    "NEIRO":  "neiro",
+    "SNEK":   "snek",
+    "APE":    "apecoin",
+    # DePIN / infrastructure
+    "GRASS":  "grass",
+    "AKT":    "akash-network",
+    "AITECH": "solidus-ai-tech",
+    # DeFi / exchange
+    "AEVO":   "aevo",
+    "STG":    "stargate-finance",
+    "ALT":    "altlayer",
+    "CFG":    "centrifuge",
+    "AUDIO":  "audius",
+    # Gaming / NFT
+    "PIXEL":  "pixels",
+    # AI
+    "AIXBT":  "aixbt-by-virtuals",
+    "SKYAI":  "skyai",
+    # RWA / new chains
+    "PLUME":  "plume",
+    # Bio / science
+    "BIO":    "bio-protocol",
+    # Other
+    "PNUT":   "peanut-the-squirrel",
 }
 
 
@@ -287,7 +425,7 @@ def _build_cg_id_map() -> dict[str, str]:
         for page in (2, 1):  # fetch page 2 first so page 1 (higher mcap) wins on symbol conflict
             with httpx.Client(timeout=20) as client:
                 resp = client.get(
-                    "https://api.coingecko.com/api/v3/coins/markets",
+                    "https://pro-api.coingecko.com/api/v3/coins/markets",
                     params={"vs_currency": "usd", "order": "market_cap_desc",
                             "per_page": 250, "page": page},
                 )
@@ -313,7 +451,7 @@ def fetch_tickers_for_scanner(limit: int = 3000) -> list[dict]:
     Cached for 4 minutes. The full sorted list is cached once; limit only slices on return.
     """
     _FULL_KEY = "cp_scan_tickers_full"
-    full = _cached_scan(_FULL_KEY)
+    full = _cached_scan(_FULL_KEY, ttl=_TICKER_CACHE_TTL)
 
     if full is None:
         _rate_limit()

@@ -33,11 +33,11 @@ _CSV_PATH         = config.DATA_DIR / "recommendations.csv"
 # Whale ride milestones: pnl threshold → message template
 # No trailing stops — positions hold until TP (+200%) or pnl <= -100%
 _WHALE_MILESTONES = [
-    (200.0, "🌙 {coin} +200% (${price:.4f}) — TP hit! Close position ✅"),
-    (150.0, "🚀 {coin} +150% (${price:.4f}) — on the way to +200%!"),
-    (100.0, "🚀 {coin} +100% (${price:.4f}) — 3× milestone hit!"),
-    ( 50.0, "🚀 {coin}  +50% (${price:.4f}) — 2× milestone hit!"),
-    ( 25.0, "🚀 {coin}  +25% (${price:.4f}) — 1× milestone hit!"),
+    (200.0, "🌙 {coin} +200% (€{price:.4f}) — TP hit! Close position ✅"),
+    (150.0, "🚀 {coin} +150% (€{price:.4f}) — on the way to +200%!"),
+    (100.0, "🚀 {coin} +100% (€{price:.4f}) — 3× milestone hit!"),
+    ( 50.0, "🚀 {coin}  +50% (€{price:.4f}) — 2× milestone hit!"),
+    ( 25.0, "🚀 {coin}  +25% (€{price:.4f}) — 1× milestone hit!"),
 ]
 
 _TP_ALERT_PNL = 8.0    # alert when pnl >= +8%  (2% before TP of +10%)
@@ -96,59 +96,69 @@ def _write_csv(rows: list[dict]) -> None:
 
 # ── Price fetch ───────────────────────────────────────────────────────────
 
-def _fetch_prices_usd(coin_ids: list[str]) -> dict[str, float]:
+def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) -> dict[str, float]:
     """
     Fetch current USD prices keyed by coin_id.
-    1. CoinGecko /simple/price  (lightweight, handles CG-format IDs like 'solana')
-    2. For IDs not resolved: individual CoinPaprika /tickers/{id} calls (free tier, no bulk)
+    Tiers: CoinGecko → Binance → KuCoin → CoinCap.
+    CP-format coin_ids (e.g. 'op-optimism') are translated to CG IDs before the CG call.
+    Binance/KuCoin tiers use the coin symbol from open_rows for lookup.
     """
     if not coin_ids:
         return {}
 
+    import httpx as _httpx
+    from src.connectors.coingecko import _headers as _cg_headers
+    from src.connectors.coinpaprika import SYMBOL_TO_CG_ID as _SYM_TO_CG
+
     result: dict[str, float] = {}
 
-    # 1. CoinGecko /simple/price — much lighter than /coins/markets, higher rate limit
+    # Build symbol map from open_rows (coin_id → symbol) for non-CG tiers
+    _cid_sym: dict[str, str] = {}
+    if open_rows:
+        for _r in open_rows:
+            _cid2 = _r.get("coin_id", "")
+            _sym2 = _r.get("coin", "").upper()
+            if _cid2 and _sym2:
+                _cid_sym[_cid2] = _sym2
+
+    # Translate CP-format coin_ids → CG IDs for tier 1
+    _cid_to_cg: dict[str, str] = {}
+    for _cid in coin_ids:
+        _sym = _cid_sym.get(_cid, "")
+        _first_seg = _cid.split("-")[0].upper() if "-" in _cid else ""
+        _is_cp = bool(_first_seg and _first_seg == _sym)
+        if _is_cp and _sym:
+            _cg_id = _SYM_TO_CG.get(_sym)
+            _cid_to_cg[_cid] = _cg_id if _cg_id else _cid
+        else:
+            _cid_to_cg[_cid] = _cid
+
+    _cg_to_cids: dict[str, list[str]] = {}
+    for _cid, _cgid in _cid_to_cg.items():
+        _cg_to_cids.setdefault(_cgid, []).append(_cid)
+
+    # Tier 1: CoinGecko /simple/price
     try:
-        import httpx as _httpx
-        from src.connectors.coingecko import _headers as _cg_headers
         resp = _httpx.get(
             "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": ",".join(coin_ids), "vs_currencies": "usd"},
+            params={"ids": ",".join(_cg_to_cids.keys()), "vs_currencies": "usd"},
             headers=_cg_headers(),
             timeout=15,
         )
         if resp.status_code == 200:
-            for cid, data in resp.json().items():
-                usd = data.get("usd")
-                if usd:
-                    result[cid] = float(usd)
+            for _cgid, _data in resp.json().items():
+                _usd = _data.get("usd")
+                if _usd:
+                    for _cid in _cg_to_cids.get(_cgid, [_cgid]):
+                        result[_cid] = float(_usd)
         else:
             print(f"  [alerts] CoinGecko simple/price HTTP {resp.status_code}")
     except Exception as e:
         print(f"  [alerts] CoinGecko price fetch failed: {e}")
 
-    missing = [cid for cid in coin_ids if cid not in result]
-    if not missing:
-        return result
-
-    # 2. Individual CoinPaprika /tickers/{id} calls (free on all plans, no bulk needed)
-    import httpx as _httpx
-    import time as _time
-    for cid in missing:
-        try:
-            r = _httpx.get(
-                f"https://api.coinpaprika.com/v1/tickers/{cid}",
-                params={"quotes": "USD"},
-                timeout=10,
-            )
-            if r.status_code == 200:
-                price = r.json().get("quotes", {}).get("USD", {}).get("price")
-                if price:
-                    result[cid] = float(price)
-            _time.sleep(0.12)  # stay within 10 req/sec
-        except Exception as e2:
-            print(f"  [alerts] CP ticker {cid} failed: {e2}")
-
+    # CoinGecko key is set — no exchange fallbacks needed.
+    # Symbol-based lookups on Binance/KuCoin/Gate.io are unreliable because
+    # delisted coins get their ticker reassigned to completely different tokens.
     return result
 
 
@@ -185,9 +195,12 @@ def check_price_alerts() -> None:
         return
 
     coin_ids = list({r["coin_id"] for r in open_rows})
-    usd_map  = _fetch_prices_usd(coin_ids)
+    usd_map  = _fetch_prices_usd(coin_ids, open_rows=open_rows)
     if not usd_map:
         return
+
+    from src.connectors.coingecko import get_eur_usd_rate as _get_eur_rate
+    _eur = _get_eur_rate()
 
     # entry_price map for sanity checks (coin_id → entry_price)
     entry_map: dict[str, float] = {}
@@ -207,15 +220,20 @@ def check_price_alerts() -> None:
         if usd is None:
             continue
 
-        # Sanity check: skip if fetched price deviates >90% from entry
+        # Sanity check: skip if fetched price is implausible vs entry.
+        # WHALE_RIDE TP is at +200% (3x) — anything above 4x is a bad fetch.
+        # SCANNER TP is at +20-40% — anything above 2.5x is a bad fetch.
+        # Lower floor: >85% drop is suspicious (use 0.15 floor).
         _entry_check = entry_map.get(row["coin_id"], 0)
         if _entry_check > 0:
             _ratio = usd / _entry_check
-            if _ratio < 0.1 or _ratio > 10:
+            _is_wr = row.get("type") == "WHALE_RIDE"
+            _max_ratio = 4.0 if _is_wr else 2.5
+            if _ratio < 0.15 or _ratio > _max_ratio:
                 print(
                     f"  [alerts] SANITY SKIP {row.get('coin','?')} "
                     f"fetched=${usd:.6f} vs entry=${_entry_check:.6f} "
-                    f"(ratio {_ratio:.2f}) — likely wrong coin_id"
+                    f"(ratio {_ratio:.2f}x, max {_max_ratio}x) — likely bad price source"
                 )
                 continue
 
@@ -238,9 +256,37 @@ def check_price_alerts() -> None:
             is_pr           = "PRINCIPAL_RECOVERED" in reasoning
             _peak_key       = f"{key}_peak"
 
+            # Time-based expiry: close when max_hold_hours elapsed.
+            # Serial scams are force-closed regardless of milestone/principal state.
+            import re as _re_ta
+            _now_str_ta = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            _is_scam    = "SERIAL SCAM" in reasoning
+            try:
+                _entry_dt  = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                _hrs_open  = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
+                _mh        = _re_ta.search(r"max_hold:\s*(\d+)h", reasoning)
+                _max_hold  = int(_mh.group(1)) if _mh else 720
+                _expired   = _hrs_open >= _max_hold
+                # Serial scams: force close if expired, skip if not
+                # Non-scams: close only if not already house-money managed
+                if _expired and "time_expired" not in fired and (_is_scam or not is_pr):
+                    _exp_status = "WIN" if pnl_pct > 0 else "LOSS"
+                    _scam_tag   = " ⚠️ SERIAL SCAM" if _is_scam else ""
+                    _alert(f"⏰ {coin} expired ({_hrs_open:.0f}h/{_max_hold}h) {pnl_pct:+.1f}% → {_exp_status}  €{usd * _eur:.4f}{_scam_tag}")
+                    row["status"]     = _exp_status
+                    row["exit_price"] = str(round(usd, 8))
+                    row["close_date"] = _now_str_ta
+                    row["pnl_pct"]    = str(round(pnl_pct, 2))
+                    fired.add("time_expired")
+                    dirty_csv = True
+                    print(f"  [time-expire] {coin} closed {_exp_status} {pnl_pct:+.1f}% after {_hrs_open:.0f}h{_scam_tag}")
+                    continue
+            except Exception:
+                pass
+
             # Pre-milestone: hard SL at -15%
             if not is_pr and pnl_pct <= -15.0 and "pre_sl_fired" not in fired:
-                _alert(f"🛑 {coin} -15% SL at ${usd:.4f} — WHALE_RIDE closed LOSS (pre-milestone)")
+                _alert(f"🛑 {coin} -15% SL at €{usd * _eur:.4f} — WHALE_RIDE closed LOSS (pre-milestone)")
                 row["status"]     = "LOSS"
                 row["exit_price"] = str(round(usd, 8))
                 row["close_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -262,8 +308,8 @@ def check_price_alerts() -> None:
                 if usd <= trailing_sl:
                     _close_pct = (trailing_sl - entry) / entry * 100
                     _alert(
-                        f"🔔 {coin} HOUSE MONEY closed at ${usd:.4f} "
-                        f"(trail SL ${trailing_sl:.4f} = +{_close_pct:.1f}% from entry)"
+                        f"🔔 {coin} HOUSE MONEY closed at €{usd * _eur:.4f} "
+                        f"(trail SL €{trailing_sl * _eur:.4f} = +{_close_pct:.1f}% from entry)"
                     )
                     row["status"]     = "WIN"
                     row["exit_price"] = str(round(usd, 8))
@@ -339,7 +385,7 @@ def check_price_alerts() -> None:
             # Approaching TP: pnl >= +8%  (2% before TP of +10%)
             if pnl_pct >= _TP_ALERT_PNL and "near_tp" not in fired:
                 _alert(
-                    f"⚠️ {coin} at ${usd:.4f} — approaching TP ${tp:.4f} "
+                    f"⚠️ {coin} at €{usd * _eur:.4f} — approaching TP €{tp * _eur:.4f} "
                     f"(PnL {pnl_pct:+.1f}%)"
                 )
                 fired.add("near_tp")
@@ -349,25 +395,24 @@ def check_price_alerts() -> None:
             # Approaching SL: pnl <= -8%  (2% before SL of -10%)
             if pnl_pct <= _SL_ALERT_PNL and "near_sl" not in fired:
                 _alert(
-                    f"⚠️ {coin} at ${usd:.4f} — approaching SL ${sl:.4f} "
+                    f"⚠️ {coin} at €{usd * _eur:.4f} — approaching SL €{sl * _eur:.4f} "
                     f"(PnL {pnl_pct:+.1f}%)"
                 )
                 fired.add("near_sl")
             elif pnl_pct > _SL_ALERT_PNL and "near_sl" in fired:
                 fired.discard("near_sl")  # reset if price recovered
 
-    if dirty_csv:
-        _write_csv(rows)
-
+    # Always save state first — fired milestone flags must persist even if CSV write fails.
     # Prune state for closed positions (keep it lean)
-    # Keys take two forms: "<coin>|<date>" (fired set) and "<coin>|<date>_peak" (peak tracker)
     open_keys = {_position_key(r) for r in open_rows}
     for k in list(state.keys()):
-        base = k[:-5] if k.endswith("_peak") else k  # strip _peak suffix
+        base = k[:-5] if k.endswith("_peak") else k
         if base not in open_keys:
             del state[k]
-
     _save_state(state)
+
+    if dirty_csv:
+        _write_csv(rows)
 
 
 # ── Custom price targets (spam alert) ─────────────────────────────────────
@@ -375,7 +420,6 @@ def check_price_alerts() -> None:
 # Each entry: (cp_coin_id, symbol, target_pct, baseline_price)
 # baseline_price = price at time of setup; alert fires when current >= baseline * (1 + target_pct/100)
 _SPAM_ALERTS: list[tuple[str, str, float, float]] = [
-    ("dydx-dydx", "dYdX", 30.0, 0.135908),  # baseline $0.135908 on 2026-04-17
 ]
 _SPAM_COUNT = 50  # number of messages to send
 
@@ -406,7 +450,9 @@ def check_spam_alerts(state: dict) -> None:
 
         target_price = baseline * (1 + target_pct / 100)
         pnl = (price - baseline) / baseline * 100
-        print(f"  [alerts] {symbol}: ${price:.6f} (baseline ${baseline:.6f}, target ${target_price:.6f}, now {pnl:+.1f}%)")
+        from src.connectors.coingecko import get_eur_usd_rate as _spam_eur_rate
+        _sr = _spam_eur_rate()
+        print(f"  [alerts] {symbol}: €{price * _sr:.6f} (baseline €{baseline * _sr:.6f}, target €{target_price * _sr:.6f}, now {pnl:+.1f}%)")
 
         if price >= target_price:
             print(f"  [alerts] 🚨 {symbol} +{target_pct:.0f}% HIT — spamming {_SPAM_COUNT} messages...")
@@ -415,7 +461,7 @@ def check_spam_alerts(state: dict) -> None:
                 try:
                     send_telegram(
                         f"🚨🚨🚨 <b>dYdX +{target_pct:.0f}% HIT!</b> 🚨🚨🚨\n"
-                        f"Price: ${price:.6f}  (was ${baseline:.6f})\n"
+                        f"Price: €{price * _sr:.6f}  (was €{baseline * _sr:.6f})\n"
                         f"[{i}/{_SPAM_COUNT}] WAKE UP!!!"
                     )
                 except Exception:

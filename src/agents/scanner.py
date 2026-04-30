@@ -22,25 +22,180 @@ def fetch_ohlcv(coin_id: str, days: int = 30) -> list[dict]:
     return _cg_fetch_ohlcv(coin_id, days)
 
 
+def _fetch_ohlcv_binance(symbol: str, days: int) -> list[dict]:
+    """Binance public klines — free, no key, covers most coins via {SYM}USDT."""
+    import httpx as _hx
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        resp = _hx.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": f"{symbol}USDT", "interval": "1d", "limit": min(days + 2, 1000)},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return []
+        result = []
+        for c in resp.json():
+            try:
+                result.append({
+                    "timestamp": _dt.fromtimestamp(c[0] / 1000, tz=_tz.utc).replace(tzinfo=None),
+                    "open":  float(c[1]),
+                    "high":  float(c[2]),
+                    "low":   float(c[3]),
+                    "close": float(c[4]),
+                })
+            except (ValueError, IndexError):
+                continue
+        return result
+    except Exception:
+        return []
+
+
+def _fetch_ohlcv_kucoin(symbol: str, days: int) -> list[dict]:
+    """KuCoin public klines — free, no key, covers long-tail coins."""
+    import httpx as _hx
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        end_ts   = int(_time.time())
+        start_ts = end_ts - days * 86400
+        resp = _hx.get(
+            "https://api.kucoin.com/api/v1/market/candles",
+            params={"symbol": f"{symbol}-USDT", "type": "1day",
+                    "startAt": start_ts, "endAt": end_ts},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return []
+        raw = resp.json().get("data") or []
+        result = []
+        for c in raw:
+            try:
+                result.append({
+                    "timestamp": _dt.fromtimestamp(int(c[0]), tz=_tz.utc).replace(tzinfo=None),
+                    "open":  float(c[1]),
+                    "close": float(c[2]),
+                    "high":  float(c[3]),
+                    "low":   float(c[4]),
+                })
+            except (ValueError, IndexError):
+                continue
+        return result
+    except Exception:
+        return []
+
+
+def _fetch_ohlcv_okx(symbol: str, days: int) -> list[dict]:
+    """OKX public candles — free, no key, covers CORE and most altcoins."""
+    import httpx as _hx
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        resp = _hx.get(
+            "https://www.okx.com/api/v5/market/candles",
+            params={"instId": f"{symbol}-USDT", "bar": "1D", "limit": min(days + 2, 300)},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return []
+        raw = resp.json().get("data") or []
+        result = []
+        for c in raw:
+            try:
+                result.append({
+                    "timestamp": _dt.fromtimestamp(int(c[0]) / 1000, tz=_tz.utc).replace(tzinfo=None),
+                    "open":  float(c[1]),
+                    "high":  float(c[2]),
+                    "low":   float(c[3]),
+                    "close": float(c[4]),
+                })
+            except (ValueError, IndexError):
+                continue
+        result.sort(key=lambda x: x["timestamp"])  # OKX returns newest-first
+        return result
+    except Exception:
+        return []
+
+
+def _fetch_ohlcv_kraken(symbol: str, days: int) -> list[dict]:
+    """Kraken public OHLC — free, no key, good coverage of major/mid-cap coins."""
+    import httpx as _hx
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        for pair in (f"{symbol}USD", f"{symbol}USDT"):
+            resp = _hx.get(
+                "https://api.kraken.com/0/public/OHLC",
+                params={"pair": pair, "interval": 1440},
+                timeout=15,
+            )
+            d = resp.json()
+            if d.get("error"):
+                continue
+            result_data = d.get("result", {})
+            keys = [k for k in result_data if k != "last"]
+            if not keys:
+                continue
+            raw = result_data[keys[0]]
+            result = []
+            for c in raw:
+                try:
+                    result.append({
+                        "timestamp": _dt.fromtimestamp(int(c[0]), tz=_tz.utc).replace(tzinfo=None),
+                        "open":  float(c[1]),
+                        "high":  float(c[2]),
+                        "low":   float(c[3]),
+                        "close": float(c[4]),
+                    })
+                except (ValueError, IndexError):
+                    continue
+            if result:
+                return result[-days:]  # Kraken returns up to 720 — trim to requested days
+        return []
+    except Exception:
+        return []
+
+
+_MIN_CANDLES = 14   # minimum candles needed for reliable RSI/MACD
+
+
+# Pre-built CG ID map — populated once per scan in run_smart_scanner, reused per-coin.
+_cg_id_cache: dict[str, str] = {}
+
 def _fetch_ohlcv_for_coin(coin: dict, days: int = 30) -> list[dict]:
     """
-    Fetch OHLCV for TA.  CoinPaprika historical OHLCV requires a paid plan on
-    free tier — always try CP first (fast fail) then fall back to CoinGecko.
-    For CP coins without a known CG ID, look it up from the dynamic map.
+    Fetch OHLCV with multi-source fallback chain:
+    CoinGecko (static ID) → CoinGecko (search) → Binance → KuCoin → OKX → Kraken
     """
-    if coin.get("_cp_id"):
-        data = _cp_fetch_ohlcv(coin["_cp_id"], days)
-        if data and len(data) >= 20:
+    from src.connectors.coingecko import search_cg_id as _cg_search
+
+    sym   = coin.get("symbol", "").upper()
+    cg_id = coin.get("_cg_id") or (coin.get("id") if not coin.get("_cp_id") else "")
+    if not cg_id:
+        cg_id = _cg_id_cache.get(sym, "")
+
+    if cg_id:
+        data = _cg_fetch_ohlcv(cg_id, days)
+        if data and len(data) >= _MIN_CANDLES:
             return data
-        # CP returned too few candles (free-tier limit) — fall back to CoinGecko
-        cg_id = coin.get("_cg_id", "")
-        if not cg_id:
-            sym = coin.get("symbol", "").upper()
-            cg_id = _cp_build_cg_id_map().get(sym, "")
-        if cg_id:
-            return _cg_fetch_ohlcv(cg_id, days)
-        return []
-    return _cg_fetch_ohlcv(coin["id"], days)
+
+    found_id = _cg_search(sym)
+    if found_id and found_id != cg_id:
+        data = _cg_fetch_ohlcv(found_id, days)
+        if data and len(data) >= _MIN_CANDLES:
+            return data
+
+    # Exchange fallbacks — free, no key required
+    for _fetcher, _source in (
+        (_fetch_ohlcv_binance, "Binance"),
+        (_fetch_ohlcv_kucoin,  "KuCoin"),
+        (_fetch_ohlcv_okx,     "OKX"),
+        (_fetch_ohlcv_kraken,  "Kraken"),
+    ):
+        data = _fetcher(sym, days)
+        if data and len(data) >= _MIN_CANDLES:
+            print(f" [{_source}]", end="", flush=True)
+            return data
+
+    return []
 
 STABLECOINS = {
     "USDT", "USDC", "DAI", "BUSD", "TUSD", "USDD", "FDUSD", "PYUSD",
@@ -417,25 +572,96 @@ def _check_wash_trading(coin: dict, ohlcv: list[dict]) -> tuple[bool, str]:
 
 
 def _quick_score(coin: dict, trending_symbols: set[str] | None = None) -> tuple[int, list[str]]:
-    """Score from market data alone (no OHLCV needed)."""
-    score = 0
-    reasons = []
+    """
+    Pre-filter score using bulk market data only (no OHLCV needed).
+    Selects the 60 best candidates before expensive OHLCV/TA fetch.
 
+    Uses every field already in the bulk response so the top-200 set
+    is as close as possible to what full TA would rank highly.
+    """
+    score = 0
+    reasons: list[str] = []
+
+    sym        = coin.get("symbol", "").upper()
     change_7d  = coin.get("price_change_percentage_7d_in_currency") or 0
+    change_24h = coin.get("price_change_percentage_24h") or 0
     volume     = coin.get("total_volume") or 0
     market_cap = coin.get("market_cap") or 1
+    ath_pct    = coin.get("ath_change_percentage") or 0   # negative = below ATH
+    circ       = coin.get("circulating_supply") or 0
+    total_s    = coin.get("total_supply") or 0
+    vm         = volume / market_cap
 
-    if change_7d < -15:
-        score += 1
-        reasons.append(f"7d dip {change_7d:.1f}%")
+    # Hard pre-exclude: already pumped >200% or micro-cap (<$500k) — waste of TA slots
+    if change_7d > 200:
+        return -99, ["already pumped >200% 7d"]
+    if 0 < market_cap < 500_000:
+        return -99, ["micro-cap <$500k"]
+    # Hard pre-exclude: circulating supply < 15% (unlock risk)
+    if total_s > 0 and circ > 0 and (circ / total_s) < 0.15:
+        return -99, ["circ supply <15%"]
 
-    if volume > market_cap * 0.1:
+    # ── 7d dip depth (oversold bounce signal) ─────────────────────────────
+    if change_7d < -50:
+        score += 3
+        reasons.append(f"deep 7d dip {change_7d:.0f}% (+3)")
+    elif change_7d < -30:
+        score += 2
+        reasons.append(f"7d dip {change_7d:.0f}% (+2)")
+    elif change_7d < -15:
         score += 1
-        reasons.append(f"vol/mcap {volume/market_cap:.2f}x")
+        reasons.append(f"7d dip {change_7d:.0f}% (+1)")
+    elif change_7d > 30:
+        score -= 1
+        reasons.append(f"7d already up {change_7d:.0f}% (-1)")
 
-    if trending_symbols and coin.get("symbol", "").upper() in trending_symbols:
+    # ── Volume / market-cap ratio (buying pressure) ────────────────────────
+    if vm > 0.50:
+        score += 3
+        reasons.append(f"vol/mcap {vm:.2f}x (+3)")
+    elif vm > 0.30:
+        score += 2
+        reasons.append(f"vol/mcap {vm:.2f}x (+2)")
+    elif vm > 0.10:
         score += 1
-        reasons.append("CMC trending")
+        reasons.append(f"vol/mcap {vm:.2f}x (+1)")
+    elif vm < 0.02:
+        score -= 1
+        reasons.append(f"vol/mcap {vm:.3f}x dead (+−1)")
+
+    # ── 24h momentum ──────────────────────────────────────────────────────
+    if 2 <= change_24h <= 15:
+        score += 1
+        reasons.append(f"24h momentum {change_24h:+.1f}% (+1)")
+    elif change_24h > 15:
+        score -= 1
+        reasons.append(f"24h already up {change_24h:+.1f}% (-1)")
+    elif change_24h < -5:
+        score -= 1
+        reasons.append(f"24h bleeding {change_24h:+.1f}% (-1)")
+
+    # ── ATH distance (coiled spring potential) ─────────────────────────────
+    if ath_pct < -90:
+        score += 2
+        reasons.append(f"ATH {ath_pct:.0f}% — coiled spring (+2)")
+    elif ath_pct < -70:
+        score += 1
+        reasons.append(f"ATH {ath_pct:.0f}% discount (+1)")
+
+    # ── Oversold proxy: sharp 7d + 24h both negative → likely oversold ────
+    if change_7d < -20 and change_24h < -3:
+        score += 1
+        reasons.append("oversold proxy: 7d+24h both down (+1)")
+
+    # ── CMC trending ──────────────────────────────────────────────────────
+    if trending_symbols and sym in trending_symbols:
+        score += 1
+        reasons.append("CMC trending (+1)")
+
+    # ── SEC/CFTC commodity (known regulatory safety) ──────────────────────
+    if sym in SEC_COMMODITY_TOKENS:
+        score += 1
+        reasons.append("SEC/CFTC commodity (+1)")
 
     return score, reasons
 
@@ -935,9 +1161,28 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
     auto_rides: list[dict] = []
     triggered:  list[str]  = []
 
+    # Load already-open WHALE_RIDE symbols so we don't re-trigger the same position
+    _open_whale_syms: set[str] = set()
+    try:
+        import csv as _csv_cw
+        _rec_path = config.DATA_DIR / "recommendations.csv"
+        if _rec_path.exists():
+            with open(_rec_path, newline="", encoding="utf-8") as _rf:
+                _open_whale_syms = {
+                    r.get("coin", "").upper()
+                    for r in _csv_cw.DictReader(_rf)
+                    if r.get("type") == "WHALE_RIDE" and r.get("status") == "OPEN"
+                }
+    except Exception:
+        pass
+
     for sym, entry in watchlist.items():
         if sym in WASH_TRADING_CONFIRMED or sym in PERMANENTLY_EXCLUDED:
             continue   # never auto-ride confirmed wash traders or permanently excluded coins
+        # Already open as a WHALE_RIDE — clean up watchlist entry silently
+        if sym in _open_whale_syms:
+            triggered.append(sym)
+            continue
         coin = coin_map.get(sym)
         if not coin:
             continue
@@ -1147,8 +1392,8 @@ def run_smart_scanner(
     label    = exchange.upper() if exchange else "ALL EXCHANGES"
     fg_value = (fear_greed or {}).get("value", 50)   # 0-100; used for macro gates below
     # Fetch 3000 coins — CP sorts strictly by market cap, pump coins can sit at rank 1001-3000
-    # while CoinGecko ranked them higher due to activity weighting. TA loop only touches top 60
-    # candidates (quick_score cap), so the extra coins add zero TA overhead.
+    # while CoinGecko ranked them higher due to activity weighting. TA loop touches top 200
+    # candidates (quick_score cap) — sized to stay within the CoinGecko pro 100k/month budget.
     _pages = 4
     _top_n = 3000
     print("\n" + "=" * 60)
@@ -1411,13 +1656,15 @@ def run_smart_scanner(
         print(f"  🐋 {len(whale_rides)} whale ride candidate(s)")
     exchange_coins = safe_coins
 
-    # 5. Quick-score all, take top 40 for OHLCV analysis
+    # 5. Pre-filter score all, take top 200 for OHLCV/TA analysis
     quick_scored = []
     for coin in exchange_coins:
         qs, qr = _quick_score(coin, trending_symbols)
+        if qs == -99:
+            continue   # hard pre-exclude (pumped/micro-cap/low-float)
         quick_scored.append((coin, qs, qr))
     quick_scored.sort(key=lambda x: x[1], reverse=True)
-    candidates = quick_scored[:60]
+    candidates = quick_scored[:250]
 
     # 5b. Compute sector averages from the full coin list (narrative momentum)
     sector_avgs = _compute_sector_avgs(exchange_coins)
@@ -1439,8 +1686,17 @@ def run_smart_scanner(
     except Exception as e:
         print(f"  News fetch skipped: {e}")
 
-    # 6. Fetch OHLCV + compute TA for each candidate
-    print(f"\n  Computing TA for {len(candidates)} candidates (~{len(candidates) * 2}s, top60 by quick score)...")
+    # 6. Pre-build CG ID map once (avoids one CG API call per coin in the loop)
+    global _cg_id_cache
+    try:
+        _cg_id_cache = _cp_build_cg_id_map()
+        print(f"  CG ID map loaded ({len(_cg_id_cache)} symbols)")
+    except Exception as _cg_map_e:
+        print(f"  CG ID map failed ({_cg_map_e}) — using static map only")
+        _cg_id_cache = {}
+
+    # 6b. Fetch OHLCV + compute TA for each candidate
+    print(f"\n  Computing TA for {len(candidates)} candidates (top250 by pre-filter score)...")
     results      = []
     wash_trading = []  # symbols excluded for wash trading
     _bearish_skip_count = 0       # tracks market-wide bearish alignment skips
@@ -1448,16 +1704,18 @@ def run_smart_scanner(
     for i, (coin, qs, qr) in enumerate(candidates):
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
+        print(f"  [{i+1}/{len(candidates)}] {symbol:<12} score={qs:+d}  fetching OHLCV...", end="", flush=True)
         try:
-            ohlcv = _fetch_ohlcv_for_coin(coin, days=60)
-            if not ohlcv or len(ohlcv) < 20:
-                continue
+            ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
+            if not ohlcv or len(ohlcv) < _MIN_CANDLES:
+                print(f" ⚠️  no OHLCV — continuing with neutral TA (RSI/MACD unknown)")
+                ohlcv = []  # compute_ta handles empty list → neutral signals
 
             # Wash trading check — runs before TA to avoid wasting cycles
             is_wash, wash_reason = _check_wash_trading(coin, ohlcv)
             if is_wash:
                 wash_trading.append((symbol, wash_reason))
-                print(f"  ⚠️  WASH TRADING: {symbol} — {wash_reason}")
+                print(f" ⚠️  WASH TRADING — {wash_reason}")
                 continue
 
             ta    = compute_ta(coin_id, symbol, ohlcv)
@@ -1545,24 +1803,25 @@ def run_smart_scanner(
                 print(f"  ❌ SKIP {symbol}: already pumped +{change_7d:.0f}% 7d — whale ride territory, not scanner")
                 continue
 
-            # Gate: full bearish alignment — skip only if ALL FOUR conditions are true:
-            #   1. MACD bearish  2. Trend bearish  3. 7d < -10%  4. 24h < -3%
-            # This keeps coins like PEPE/FLOKI/CHZ that are technically bearish but not crashing.
-            # Auto-relax: if >50% of candidates already hit this gate, widen to 7d < -15% only
-            #   (market-wide extreme fear — MACD lag is unreliable, price action governs).
+            # Gate: full bearish alignment — skip only if ALL conditions AND not oversold.
+            # Oversold coins (RSI < 45) are EXEMPTED: bearish trend on an oversold coin
+            # is the contrarian SETUP we want, not a reason to skip.
+            _rsi_val = ta.rsi_14 if ta.rsi_14 is not None else 50
+            _oversold_exempt = _rsi_val < 45
             _market_wide_bearish = _bearish_skip_count >= len(candidates) * 0.5
             if _market_wide_bearish:
                 if not _market_wide_announced:
-                    print("  ⚠️ MARKET-WIDE BEARISH — filter relaxed (skip only if 7d < -15%)")
+                    print("  ⚠️ MARKET-WIDE BEARISH — filter relaxed (only hard-crash coins skipped)")
                     _market_wide_announced = True
-                if change_7d < -15:
+                if change_7d < -15 and change_24h_raw < -8 and not _oversold_exempt:
                     _bearish_skip_count += 1
-                    print(f"  ❌ SKIP {symbol}: market-wide bearish confirmed (7d {change_7d:.1f}% < -15%)")
+                    print(f"  ❌ SKIP {symbol}: market-wide bearish, hard crash (7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
                     continue
             elif (ta.macd_signal == "BEARISH" and trend_val == "BEARISH"
-                  and change_7d < -10 and change_24h_raw < -3):
+                  and change_7d < -10 and change_24h_raw < -5
+                  and not _oversold_exempt):
                 _bearish_skip_count += 1
-                print(f"  ❌ SKIP {symbol}: full bearish alignment (MACD+Trend BEARISH, 7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
+                print(f"  ❌ SKIP {symbol}: full bearish (MACD+Trend BEARISH, 7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
                 continue
 
             # Gate: extreme fear (F&G < 30) + no MACD bullish = 49% loss rate (data-driven)
@@ -1730,12 +1989,13 @@ def run_smart_scanner(
                 "deep_dip":         deep_dip,           # SIREN bonus rule
                 "deep_dip_tb":      deep_dip_tb,        # +1 → prioritized in top 3
             })
-        except Exception:
-            pass
+            rsi_str  = f"RSI={ta.rsi_14:.0f}" if ta.rsi_14 else "RSI=n/a"
+            bb_str   = f"BB={ta.bollinger_position}" if ta.bollinger_position else "BB=n/a"
+            print(f" score={raw_score:+d}  {rsi_str}  {bb_str}  candles={len(ohlcv)}")
+        except Exception as _e:
+            print(f" ERROR: {_e}")
 
         time.sleep(0.11 if _cp_ok else 2)  # CP: 10 req/sec; CG: ~30 req/min
-        if (i + 1) % 10 == 0:
-            print(f"    {i+1}/{len(candidates)} done...")
 
     if wash_trading:
         print(f"  ⚠️  {len(wash_trading)} wash trading coin(s) excluded from ranking")

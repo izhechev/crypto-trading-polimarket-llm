@@ -604,11 +604,11 @@ def _tp_sl_for_fg(entry: float, fear_greed_value: int) -> tuple[float, float]:
     """
     Return (take_profit, stop_loss) based on Fear & Greed index.
 
-      F&G <  20  → TP +10%  | SL -10%  (extreme fear — tight targets)
-      F&G 20-40  → TP +15%  | SL -12%  (fear — moderate targets)
+      F&G <  30  → TP +10%  | SL -10%  (extreme fear — tight targets)
+      F&G 30-40  → TP +15%  | SL -12%  (fear — moderate targets)
       F&G >  40  → TP +20%  | SL -15%  (neutral/greed — wider targets)
     """
-    if fear_greed_value < 20:
+    if fear_greed_value < 30:
         tp_mult, sl_mult = 1.10, 0.90
     elif fear_greed_value <= 40:
         tp_mult, sl_mult = 1.15, 0.88
@@ -868,17 +868,24 @@ def update_scanner_sltp(
                 orig_tp = float(row.get("take_profit") or 0)
 
                 if entry_f > 0:
-                    # TP cap: never exceed entry × 1.25
-                    max_tp = round(entry_f * 1.25, 8)
-                    if take_profit > max_tp:
-                        print(f"  TP capped at entry×1.25 for {coin.upper()}: ${take_profit:.6f} → ${max_tp:.6f}")
-                        take_profit = max_tp
+                    # Sanity: SL must be below entry, TP must be above entry
+                    if stop_loss >= entry_f or take_profit <= entry_f:
+                        print(f"  ⚠️  Groq SL/TP inverted for {coin.upper()} "
+                              f"(entry=${entry_f:.6f} SL=${stop_loss:.6f} TP=${take_profit:.6f}) — keeping original")
+                        stop_loss   = orig_sl
+                        take_profit = orig_tp
+                    else:
+                        # TP cap: never exceed entry × 1.25
+                        max_tp = round(entry_f * 1.25, 8)
+                        if take_profit > max_tp:
+                            print(f"  TP capped at entry×1.25 for {coin.upper()}: ${take_profit:.6f} → ${max_tp:.6f}")
+                            take_profit = max_tp
 
-                    # SL floor: never widen (move further from entry) beyond the F&G-based original.
-                    # Groq can only tighten the SL (move it closer to entry), not loosen it.
-                    if orig_sl > 0 and stop_loss < orig_sl:
-                        print(f"  SL floor kept for {coin.upper()}: Groq ${stop_loss:.6f} < original ${orig_sl:.6f} — keeping original")
-                        stop_loss = orig_sl
+                        # SL floor: never widen (move further from entry) beyond the F&G-based original.
+                        # Groq can only tighten the SL (move it closer to entry), not loosen it.
+                        if orig_sl > 0 and stop_loss < orig_sl:
+                            print(f"  SL floor kept for {coin.upper()}: Groq ${stop_loss:.6f} < original ${orig_sl:.6f} — keeping original")
+                            stop_loss = orig_sl
             except (ValueError, TypeError):
                 pass
             row["stop_loss"]   = stop_loss
@@ -1148,6 +1155,14 @@ def update_open_positions() -> None:
     if not usd_map:
         print("  Warning: could not fetch prices for tracking: all sources failed — time-expiry closes still run")
 
+    # Fetch F&G once — used for extreme fear auto-close rule
+    _fg_value = 50
+    try:
+        from src.connectors.coingecko import fetch_fear_greed as _ffg
+        _fg_value = _ffg().get("value", 50)
+    except Exception:
+        pass
+
     closed    = 0
     new_wins: list[dict] = []
     for row in rows:
@@ -1388,18 +1403,40 @@ def update_open_positions() -> None:
                     f"  Worst case now: small profit.")
             except Exception:
                 pass
-        elif pnl_pct >= 10 and "[BREAKEVEN]" not in _reasoning and "[TRAIL_5]" not in _reasoning and "[TRAIL_10]" not in _reasoning and sl < entry:
-            sl = round(entry, 8)
-            row["stop_loss"] = sl
-            row["reasoning"] = _reasoning + " [BREAKEVEN]"
-            print(f"  📈 TRAIL SL: {row['coin']} at {pnl_pct:+.1f}% → SL locked at breakeven")
+        elif pnl_pct >= 9.5 and "[TRAIL_5]" not in _reasoning and "[TRAIL_10]" not in _reasoning and "[BREAKEVEN_WIN]" not in _reasoning:
+            row["status"]     = "WIN"
+            row["exit_price"] = round(usd, 6)
+            row["close_date"] = _now_str
+            row["reasoning"]  = _reasoning + " [BREAKEVEN_WIN]"
+            closed += 1
+            new_wins.append(row)
+            print(f"  ✅ +10% WIN CLOSE: {row['coin']} {pnl_pct:+.1f}% — locked as WIN")
             try:
                 from src.utils.telegram import send_telegram as _tg
-                _tg(f"📈 <b>BREAKEVEN LOCKED — {row['coin']}</b>\n"
-                    f"  Position at {pnl_pct:+.1f}% → stop loss raised to entry price.\n"
-                    f"  <b>This position can no longer lose money.</b> Let it run.")
+                _tg(f"✅ <b>+10% WIN — {row['coin']}</b>\n"
+                    f"  Position at {pnl_pct:+.1f}% → closed as WIN.\n"
+                    f"  <b>Profit locked. No more risk.</b>")
             except Exception:
                 pass
+            continue
+
+        # Extreme fear auto-close: F&G < 30 → take any profit >= +10% immediately
+        if _fg_value < 30 and pnl_pct >= 9.5:
+            row["status"]     = "WIN"
+            row["exit_price"] = round(usd, 6)
+            row["close_date"] = _now_str
+            closed += 1
+            new_wins.append(row)
+            print(f"  💰 EXTREME FEAR CLOSE: {row['coin']} {pnl_pct:+.1f}% locked (F&G={_fg_value})")
+            try:
+                from src.utils.telegram import send_telegram as _tg
+                _tg(f"💰 <b>EXTREME FEAR CLOSE — {row['coin']}</b>\n"
+                    f"  F&amp;G = {_fg_value} (extreme fear)\n"
+                    f"  Profit locked: {pnl_pct:+.1f}%\n"
+                    f"  ✅ Position closed automatically.")
+            except Exception:
+                pass
+            continue
 
         if tp > 0 and usd >= tp:
             row["status"]     = "WIN"

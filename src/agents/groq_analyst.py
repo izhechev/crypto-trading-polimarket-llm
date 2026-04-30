@@ -100,21 +100,33 @@ def analyze_with_groq(
             reason = "above upper BB"
         elif s_risk != "NONE":
             reason = f"supply risk={s_risk}"
-        # 0A: full bearish alignment — require ALL FOUR conditions (same as main scanner gate)
-        # Only skip if MACD bearish + Trend bearish + 7d < -10% + 24h < -3%.
-        # OP had MACD+Trend bearish but 7d > -10% → should NOT be removed.
+        # 0A: full bearish alignment — MACD+Trend both bearish + hard crash
         elif (macd_v == "BEARISH" and trend_v == "BEARISH"
               and ch7d < -10 and ch24 < -3):
             reason = f"full bearish alignment (MACD+Trend+7d{ch7d:+.0f}%+24h{ch24:+.0f}%)"
-        # 0F: no momentum — skip if no Archetype A carve-out (RSI >= 42)
-        elif ch24 < 2.0 and rsi >= 42:
-            reason = f"24h {ch24:+.1f}% < +2% and RSI {rsi:.1f} ≥ 42 (no momentum)"
-        # 0G: minimum score — v2.0 requires ≥ 3 (was > 1)
-        elif score <= 2:
-            reason = f"score={score} (too low, need ≥3)"
-        # 0H: already open
+        # 0G: negative/zero score — never open
+        elif score <= 0:
+            reason = f"score={score} (negative — skip)"
+        # 0H: already open — no duplicate positions
         elif sym in _open_set:
             reason = "already OPEN"
+        # 0F (revised): three-path qualification gate
+        #   Path A — momentum:  24h > +2%,   RSI 50–70, MACD bullish
+        #   Path B — reversal:  7d < -15%,   MACD bullish, RSI 35–55
+        #   Path C — override:  score ≥ 9,   vol/mcap > 0.5x, MACD bullish
+        # Reject only if NONE of the three qualifies.
+        else:
+            _macd_bull = macd_v == "BULLISH"
+            path_a = ch24 > 2.0    and 50 <= rsi <= 70 and _macd_bull
+            path_b = ch7d < -15.0  and _macd_bull       and 35 <= rsi <= 55
+            path_c = score >= 9    and vol_mcap > 0.5   and _macd_bull
+            if not (path_a or path_b or path_c):
+                reason = (
+                    f"no path qualified — "
+                    f"A(24h{ch24:+.1f}%,RSI{rsi:.0f},MACD{macd_v[:4]}) "
+                    f"B(7d{ch7d:+.0f}%,RSI{rsi:.0f}) "
+                    f"C(sc={score},vol={vol_mcap:.2f}x)"
+                )
 
         if reason:
             hard_removed.append(f"{sym}({reason})")
@@ -135,6 +147,8 @@ def analyze_with_groq(
         print(f"  Pre-filter ❌ removed: {', '.join(hard_removed)}")
     if score_capped:
         print(f"  Pre-filter ⚠️  capped (MACD bearish+neutral, score→{_SCORE_CAP_MACD_NEUTRAL}): {', '.join(score_capped)}")
+    if 0 < len(groq_candidates) < 5:
+        print(f"  ⚠️ Filter too tight — only {len(groq_candidates)} candidates. Consider relaxing thresholds.")
     if not groq_candidates:
         print("  No clean candidates for Groq after pre-filter — skipping analysis.")
         return None, groq_candidates
@@ -288,9 +302,9 @@ NEVER set TP closer than 1.20x or SL tighter than 0.92x — minimum R:R is 2.5:1
 
 High ATH drop (95%+) is NOT a reason to avoid — it is a SETUP. ATL coins with vol and catalysts are prime bounces.
 
-Return this JSON object with EXACTLY 3 picks. Always pick 3 — never fewer.
-If fewer than 3 coins have strong setups, pick the next-best coins anyway with LOW confidence.
-Having 3 picks is mandatory so the portfolio always has fresh candidates:
+Return this JSON object with EXACTLY 10 picks. Always pick 10 — never fewer.
+Rank all candidates from best to worst. If fewer than 10 have strong setups, fill remaining slots with LOW confidence picks.
+Having 10 picks is mandatory so the portfolio always has fresh candidates to open:
 {{
   "picks": [
     {{
@@ -435,6 +449,25 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
     if not raw_picks and parsed.get("coin"):
         raw_picks = [parsed]
 
+    # Deduplicate: if the same coin appears multiple times, keep the highest-confidence variant
+    _CONF_ORDER = {"high": 3, "medium": 2, "low": 1}
+    _seen_coins: dict[str, dict] = {}
+    for _pick in raw_picks:
+        _sym = (_pick.get("coin") or "").upper()
+        if not _sym:
+            continue
+        _conf = (_pick.get("confidence") or "low").lower()
+        if _sym not in _seen_coins:
+            _seen_coins[_sym] = _pick
+        else:
+            _existing_conf = (_seen_coins[_sym].get("confidence") or "low").lower()
+            if _CONF_ORDER.get(_conf, 0) > _CONF_ORDER.get(_existing_conf, 0):
+                _seen_coins[_sym] = _pick
+    if len(_seen_coins) < len(raw_picks):
+        _dupes = len(raw_picks) - len(_seen_coins)
+        print(f"  [dedup] removed {_dupes} duplicate coin(s) from Groq output")
+    raw_picks = list(_seen_coins.values())
+
     if not raw_picks:
         print("  Groq returned no picks.")
         return None, groq_candidates
@@ -517,10 +550,10 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
         rec["scanner_score"] = scanner_score
         return rec
 
-    # Apply guards to all picks
-    guarded = [_apply_guards(r) for r in raw_picks[:3]]
+    # Apply guards to all picks (up to 10)
+    guarded = [_apply_guards(r) for r in raw_picks[:10]]
 
-    # v2.0: enforce minimum 2.5:1 R:R on every pick; mark LOW confidence as advisory only
+    # Enforce minimum 2.5:1 R:R on every pick
     for _g in guarded:
         try:
             _ep = float(_g.get("entry_price") or 0)
@@ -535,22 +568,20 @@ Having 3 picks is mandatory so the portfolio always has fresh candidates:
                     _g["take_profit"] = _new_tp
         except (TypeError, ValueError):
             pass
-        if ((_g.get("confidence") or "").lower() == "low"
-                or _g.get("advisory_only")):
-            _g["advisory_only"] = True
+        # All picks open real positions; advisory_only=False for all confidence tiers
+        _g["advisory_only"] = False
 
-    # Only HIGH and MEDIUM confidence create real entries; LOW is advisory only
-    actionable = [r for r in guarded if not r.get("advisory_only")]
-    advisory   = [r for r in guarded if r.get("advisory_only")]
-    filtered   = guarded  # display all; entry logic uses actionable subset
+    # All picks are actionable — confidence level is informational only
+    actionable = guarded
+    advisory   = []
+    filtered   = guarded
     if not filtered:
         print(f"  ⛔  NO BUY — no picks returned from Groq")
         return None, groq_candidates
 
     # ── Display TOP N BUYS ──
     n = len(actionable)
-    n_adv = len(advisory)
-    label = f"TOP {n} BUY{'S' if n != 1 else ''}" + (f" + {n_adv} ADVISORY" if n_adv else "")
+    label = f"TOP {n} BUY{'S' if n != 1 else ''}"
     print("\n" + "=" * 60)
     print(f"  GROQ LLM RECOMMENDATION — {label}")
     print("=" * 60)
