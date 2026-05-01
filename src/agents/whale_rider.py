@@ -33,20 +33,34 @@ ALERTS_PATH      = config.DATA_DIR / "whale_ride_alerts.json"
 VOL_HISTORY_PATH = config.DATA_DIR / "whale_volume_history.json"
 
 # ── Volume anomaly thresholds ─────────────────────────────────────────────────
-_VOL_EARLY_MULT   = 5.0    # today vol > 5x 30d avg → EARLY signal
-_VOL_MID_MULT     = 10.0   # today vol > 10x 30d avg → MID (confirmed pump)
-_PRICE_EARLY_MIN  = 10.0   # 24h price change minimum for EARLY
+_VOL_PRE_MULT     = 5.0    # today vol > 5x 30d avg → PRE-PUMP (early accumulation)
+_VOL_EARLY_MULT   = 2.0    # today vol > 2x 30d avg → EARLY signal (fear market = lower baseline)
+_VOL_MID_MULT     = 8.0    # today vol > 8x 30d avg → MID (confirmed pump)
+_PRICE_PRE_MIN    = 2.0    # 24h minimum for PRE stage
+_PRICE_PRE_MAX    = 7.0    # PRE cap — above this qualifies for EARLY instead
+_PRICE_EARLY_MIN  = 5.0    # 24h price change minimum for EARLY (lowered from 10%)
 _PRICE_EARLY_MAX  = 30.0   # above this → MID territory
 _PRICE_MID_MAX    = 100.0  # above this → LATE (too late to enter)
 
 # LATE stage: price already >100% 7d → watchlist only, wait for crash
 _7D_LATE_MIN      = 100.0
 
+# Tokens that should never be whale ride candidates (confirmed scam/rugged only)
+_BLACKLIST: frozenset[str] = frozenset({
+    "FTT",    # FTX collapse token — fully worthless
+})
+
 # Shared hard disqualifiers
 _MIN_MCAP         = 20_000_000  # $20M
 _MIN_CIRC_PCT     = 15.0        # circulating supply minimum
+_MIN_ENTRY_AGE_H  = 1.0         # hours before exit can fire after entry (avoids same-scan exits)
 _VOL_HISTORY_DAYS = 30          # days of volume history to keep per coin
-_MIN_HISTORY_DAYS = 7           # need at least 7 days of data before firing alerts
+_MIN_HISTORY_DAYS = 3           # need at least 3 days of data before firing alerts
+
+# PRE-PUMP extra filters (tighter — compensates for earlier, riskier entry)
+_PRE_MIN_HISTORY  = 14          # need 14 days vol history — no cold-start estimates
+_PRE_MIN_MCAP     = 50_000_000  # $50M minimum (2.5x stricter than regular)
+_PRE_COOLDOWN_HOURS = 4         # re-alert PRE stage every 4h (not 24h)
 
 # ── Exit / post-crash thresholds ──────────────────────────────────────────────
 _EXIT_24H_FLOOR   = 5.0    # 24h below this → momentum dying → exit signal
@@ -57,7 +71,7 @@ _CRASH_RSI_MAX    = 30.0   # RSI must be oversold (<30) for bounce entry
 _CRASH_VOL_MAX    = 0.30   # volume must be dying (low vol = stable bottom)
 
 # ── Alert deduplication ───────────────────────────────────────────────────────
-_DUPLICATE_HOURS  = 24     # suppress re-alert for same coin within N hours
+_DUPLICATE_HOURS  = 2      # re-alert same coin every 2h (was 24h)
 
 # ── Session-level entry tracking ─────────────────────────────────────────────
 # Populated when an entry alert is sent. Exit signals are ONLY sent for coins
@@ -83,10 +97,12 @@ def _load() -> dict:
             raw.setdefault("active", {})
             raw.setdefault("late_watchlist", {})
             raw.setdefault("last_seen_24h", {})
+            raw.setdefault("exited_ts", {})
+            raw.setdefault("pre_alerts", {})
             return raw
     except Exception:
         pass
-    return {"active": {}, "late_watchlist": {}, "last_seen_24h": {}}
+    return {"active": {}, "late_watchlist": {}, "last_seen_24h": {}, "exited_ts": {}, "pre_alerts": {}}
 
 
 def _save(data: dict) -> None:
@@ -214,6 +230,9 @@ def detect_whale_rides(
         if sym in _open_scanner_syms:
             continue
 
+        if sym in _BLACKLIST:
+            continue
+
         ch24  = coin.get("price_change_percentage_24h") or 0
         ch7d  = coin.get("price_change_percentage_7d_in_currency") or 0
         vol   = coin.get("total_volume") or 0
@@ -246,12 +265,11 @@ def detect_whale_rides(
         avg_vol = _avg_volume(hist, sym)
         _cold_start = False
         if avg_vol is None or avg_vol <= 0:
-            # Cold-start fallback: no 7-day history yet.
-            # Use vol/mcap ratio as proxy — most coins trade at ~5-15% vol/mcap normally.
-            # If today's vol/mcap > 0.50 (5x the expected baseline of 0.10), treat as
-            # a potential surge. Baseline estimated_avg = mcap * 0.10.
+            # Cold-start fallback: no 3-day history yet.
+            # Baseline estimated_avg = mcap * 0.05 (coins normally trade ~5% vol/mcap).
+            # Fires when vol/mcap > 0.10 (2x the baseline × _VOL_EARLY_MULT).
             if mcap > 0 and ch24 >= _PRICE_EARLY_MIN:
-                _est_avg = mcap * 0.10
+                _est_avg = mcap * 0.05
                 if vol > _est_avg * _VOL_EARLY_MULT:
                     avg_vol   = _est_avg
                     _cold_start = True   # flag so alert includes cold-start warning
@@ -270,23 +288,43 @@ def detect_whale_rides(
             stage = "MID"
         elif vol_ratio >= _VOL_EARLY_MULT and _PRICE_EARLY_MIN <= ch24 < _PRICE_EARLY_MAX:
             stage = "EARLY"
+        elif (
+            not _cold_start
+            and vol_ratio >= _VOL_PRE_MULT
+            and _PRICE_PRE_MIN <= ch24 < _PRICE_PRE_MAX
+            and mcap >= _PRE_MIN_MCAP
+            and len(hist.get(sym, [])) >= _PRE_MIN_HISTORY
+        ):
+            stage = "PRE"
         else:
             continue   # no anomaly
 
-        # 24h momentum declining vs previous scan → skip
+        # 24h momentum check vs previous scan
+        # NOTE: only PRE requires strictly accelerating momentum.
+        # EARLY/MID only die if ch24 drops BELOW the stage's entry floor —
+        # the 24h rolling window naturally decays as the pump ages, so a coin
+        # at +34% peaking to +21% should still fire, not get silenced.
         prev_24h_entry = seen_24h.get(sym)
         if prev_24h_entry:
-            prev_ch24 = prev_24h_entry.get("ch24", ch24)
-            prev_ts   = prev_24h_entry.get("ts", 0)
-            age_h     = (now_ts - prev_ts) / 3600
-            if age_h < 6 and ch24 < prev_ch24:
-                continue   # momentum declining
+            prev_ts = prev_24h_entry.get("ts", 0)
+            age_h   = (now_ts - prev_ts) / 3600
+            if age_h < 6:
+                if stage == "PRE":
+                    prev_ch24 = prev_24h_entry.get("ch24", ch24)
+                    if ch24 <= prev_ch24:
+                        continue   # PRE requires strictly accelerating 24h%
+                elif stage == "EARLY" and ch24 < _PRICE_EARLY_MIN:
+                    continue   # pump unwound below entry floor
+                elif stage == "MID" and ch24 < _PRICE_EARLY_MAX:
+                    continue   # pump unwound below MID floor
+        elif stage == "PRE":
+            continue   # PRE with no prior reading = can't confirm acceleration
 
         vm = vol / max(mcap, 1)
         candidates.append({
             "symbol":     sym,
             "name":       coin.get("name", sym),
-            "coin_id":    coin.get("id", ""),
+            "coin_id":    coin.get("_cg_id") or coin.get("id", ""),
             "price":      coin.get("current_price", 0),
             "change_24h": ch24,
             "change_7d":  ch7d,
@@ -297,7 +335,7 @@ def detect_whale_rides(
             "circ_pct":   round(circ_pct, 1),
             "stage":      stage,
             "risk_cat":   cat,
-            "cold_start": _cold_start,   # True = no volume history, estimate-based
+            "cold_start": _cold_start,
         })
 
     # Update last-seen 24h
@@ -308,7 +346,10 @@ def detect_whale_rides(
     data["last_seen_24h"] = seen_24h
     _save(data)
 
-    candidates.sort(key=lambda x: (0 if x["stage"] == "EARLY" else 1, -x["vol_ratio"]))
+    candidates.sort(key=lambda x: (
+        {"PRE": 0, "EARLY": 1, "MID": 2}.get(x["stage"], 3),
+        -x["vol_ratio"]
+    ))
     return candidates
 
 
@@ -319,9 +360,8 @@ def send_whale_ride_alerts(
     fear_greed: dict | None = None,
 ) -> list[dict]:
     """
-    Send Telegram alert for each new candidate.
-    Enforces: duplicate suppression (24h) only — no cap on active watches.
-    Returns candidates for which alerts were actually sent.
+    Send one batch Telegram message: "WHALE RIDE DETECTED — TOP 3".
+    Re-sends every 2h per coin. Returns candidates that were newly tracked.
     """
     from src.utils.telegram import send_telegram
 
@@ -331,89 +371,76 @@ def send_whale_ride_alerts(
     now_iso  = datetime.now(timezone.utc).isoformat()
     sent: list[dict] = []
 
-    for c in candidates:
-        sym = c["symbol"]
+    pre_alerts = data.setdefault("pre_alerts", {})
 
-        # Duplicate suppression: 24h cooldown
-        prev = active.get(sym)
-        if prev and now_ts - prev.get("alert_ts", 0) < _DUPLICATE_HOURS * 3600:
-            age_h = (now_ts - prev.get("alert_ts", 0)) / 3600
-            print(f"  ℹ️  {sym} — already alerted {age_h:.1f}h ago (24h cooldown, re-sends at {_DUPLICATE_HOURS}h)")
-            continue
+    fg_value = (fear_greed or {}).get("value", 50)
+    fg_line  = f"\n⚠️ F&amp;G = {fg_value} (Extreme Fear) — extra caution" if fg_value < 30 else ""
 
+    # Build the top-3 batch message
+    top3 = candidates[:3]
+    lines = []
+    for rank, c in enumerate(top3, 1):
+        sym       = c["symbol"]
         stage     = c["stage"]
-        price     = c["price"]
+        price_usd = c["price"]
         ch24      = c["change_24h"]
-        ch7d      = c["change_7d"]
-        vm        = c["vol_mcap"]
-        mcap_str  = _fmt_mcap(c["mcap"])
-        stage_icon  = "🟢" if stage == "EARLY" else "🟡"
-        vol_ratio   = c.get("vol_ratio", 0)
-        avg_vol_fmt = _fmt_mcap(c.get("avg_vol", 0))
-
-        risk_line   = (f"\n  ⚠️  Risk flag: {c['risk_cat']}"
-                       if c["risk_cat"] not in ("NORMAL", "SUSPICIOUS") else "")
-        supply_line = (f"\n  ⚠️  Low float: {c['circ_pct']:.0f}% circ supply"
-                       if c["circ_pct"] < 30 else "")
-        cold_line   = (f"\n  ⚠️  No vol history — estimate-based signal (treat as higher risk)"
-                       if c.get("cold_start") else "")
-        fg_line     = ""
-        if fear_greed:
-            fg_val = fear_greed.get("value", 50)
-            if fg_val < 25:
-                fg_line = f"\n  ⚠️  F&amp;G = {fg_val} (Extreme Fear) — extra caution"
-
-        name_str = c.get("name", sym)
-        msg = (
-            f"🐋 <b>Potential whale ride — invest €100 and hope for the best</b>\n\n"
-            f"  <b>{sym}</b> ({name_str})\n\n"
-            f"  Price:      {_fmt_price(price)}\n"
-            f"  24h:        {ch24:+.1f}%\n"
-            f"  7d:         {ch7d:+.0f}%\n"
-            f"  Vol spike:  {vol_ratio:.0f}x normal (avg {avg_vol_fmt}/day)\n"
-            f"  vol/mcap:   {vm:.3f}x\n"
-            f"  MCap:       {mcap_str}\n"
-            f"  Stage:      {stage_icon} <b>{stage}</b>"
-            f"{risk_line}{supply_line}{cold_line}{fg_line}\n\n"
-            f"  🎯 Target: +50% to +200% (no fixed TP)\n"
-            f"  🛑 Exit: 24h momentum &lt; +5% OR RSI &gt; 85\n"
-            f"  ⏱️ Watch hourly — not a 3-7 day hold\n"
-            f"  ⚠️ Manual trade only"
+        vol_ratio = c.get("vol_ratio", 0)
+        stage_icon = {"PRE": "🔵", "EARLY": "🟢", "MID": "🟡"}.get(stage, "⚪")
+        lines.append(
+            f"  #{rank} <b>{sym}</b> {stage_icon} {stage}  "
+            f"{_fmt_price(price_usd)}  {ch24:+.1f}%  vol {vol_ratio:.0f}x"
         )
 
+    if lines:
+        batch_msg = (
+            f"🐋 <b>WHALE RIDE DETECTED — TOP {len(top3)}</b>{fg_line}\n\n"
+            + "\n".join(lines)
+            + "\n\n  ⚠️ Manual trade only — invest $100 max per signal"
+        )
         try:
-            ok = send_telegram(msg)
+            send_telegram(batch_msg)
+            print(f"  🐋 WHALE RIDE batch sent: {', '.join(c['symbol'] for c in top3)}")
         except Exception as e:
-            print(f"  ⚠️  Whale ride alert failed for {sym}: {e}")
-            ok = False
+            print(f"  ⚠️  Whale ride batch alert failed: {e}")
 
-        if ok:
+    # Track every candidate in active dict (for exit signal monitoring)
+    for c in candidates:
+        sym   = c["symbol"]
+        stage = c["stage"]
+        ch24  = c["change_24h"]
+        ch7d      = c["change_7d"]
+        price_usd = c["price"]
+
+        if stage == "PRE":
+            pre_alerts[sym] = {"ts": now_ts, "price": price_usd}
+            continue
+
+        prev = active.get(sym)
+        prev_age_h = (now_ts - prev.get("alert_ts", 0)) / 3600 if prev else 999
+        is_new = prev is None or prev_age_h >= _DUPLICATE_HOURS
+
+        active[sym] = {
+            "alert_ts":        now_ts,
+            "alert_time":      now_iso,
+            "alert_price":     price_usd,
+            "alert_price_usd": price_usd,
+            "stage":           stage,
+            "ch7d_at_alert":   ch7d,
+            "ch24_at_alert":   ch24,
+        }
+        if is_new:
             sent.append(c)
-            active[sym] = {
-                "alert_ts":      now_ts,
-                "alert_time":    now_iso,
-                "alert_price":   price,
-                "stage":         stage,
-                "ch7d_at_alert": ch7d,
-                "ch24_at_alert": ch24,
-            }
-            # Track in session set — exit signals are gated on this
             _whale_entry_alerts_sent.add(sym)
-            print(f"  🐋 WHALE RIDE ALERT sent: {sym} [{stage}] "
-                  f"{ch24:+.1f}% 24h | vol {c.get('vol_ratio', 0):.0f}x normal")
-            # Log to recommendations.csv so it appears in the track record
             try:
                 from src.utils.logger import log_whale_rider_alert
                 fg_val = (fear_greed or {}).get("value", 50)
                 log_whale_rider_alert(c, fg_val)
-            except Exception as _le:
-                print(f"  ⚠️  Could not log whale rider to CSV: {_le}")
-        else:
-            print(f"  ⚠️  Whale ride alert NOT delivered for {sym} — skipping active tracking")
+            except Exception:
+                pass
 
-    if sent:
-        data["active"] = active
-        _save(data)
+    data["active"]     = active
+    data["pre_alerts"] = pre_alerts
+    _save(data)
 
     return sent
 
@@ -435,6 +462,7 @@ def check_exit_signals(
     if not active:
         return []
 
+    now_ts     = time.time()
     rsi_map    = rsi_map or {}
     coin_map   = {c.get("symbol", "").upper(): c for c in coins}
     to_remove: list[str] = []
@@ -446,14 +474,18 @@ def check_exit_signals(
             continue
 
         # Only send exit alerts for coins that had an entry alert in this session.
-        # Prevents phantom exits for stale active[] entries from previous runs
-        # that were added under old/different criteria.
         if sym not in _whale_entry_alerts_sent:
+            continue
+
+        # Enforce minimum hold before exit can fire — prevents same-scan exits
+        # caused by data source mismatch between detection and exit check feeds.
+        alert_ts = alert.get("alert_ts", 0)
+        if (now_ts - alert_ts) < _MIN_ENTRY_AGE_H * 3600:
             continue
 
         ch24        = coin.get("price_change_percentage_24h") or 0
         current     = coin.get("current_price", 0)
-        alert_price = alert.get("alert_price", 0)
+        alert_price = alert.get("alert_price_usd", alert.get("alert_price", 0))
         rsi         = rsi_map.get(sym)
         stage       = alert.get("stage", "?")
 
@@ -495,12 +527,153 @@ def check_exit_signals(
             pass
 
     if to_remove:
+        exited = data.setdefault("exited_ts", {})
         for sym in to_remove:
             active.pop(sym, None)
+            exited[sym] = now_ts
         data["active"] = active
         _save(data)
 
     return triggered
+
+
+# ── Sector rotation detection ────────────────────────────────────────────────
+
+# Cooldown: once a sector alert fires, suppress it for this many hours
+_SECTOR_COOLDOWN_HOURS = 6
+
+# Minimum coins in the same sector to trigger a rotation alert
+_SECTOR_MIN_COINS = 3
+
+# Sector labels → emoji for Telegram display
+_SECTOR_EMOJI: dict[str, str] = {
+    "ai":      "🤖",
+    "depin":   "📡",
+    "layer1":  "⛓️",
+    "layer2":  "🔗",
+    "defi":    "🏦",
+    "meme":    "🐸",
+    "privacy": "🔒",
+    "rwa":     "🏛️",
+}
+
+
+def detect_sector_rotation(candidates: list[dict]) -> list[dict]:
+    """
+    Group whale ride candidates by sector. Return sectors where ≥3 coins qualify
+    simultaneously — a reliable signal of narrative-driven capital rotation.
+
+    Returns list of dicts: {sector, coins (sorted by vol_ratio desc), avg_vol_ratio}
+    Only fires for sectors not already alerted within _SECTOR_COOLDOWN_HOURS.
+    """
+    try:
+        from src.agents.scanner import _SECTOR_MAP
+    except Exception:
+        return []
+
+    if not candidates:
+        return []
+
+    data     = _load()
+    now_ts   = time.time()
+    cooldown = data.setdefault("sector_rotation_ts", {})
+
+    from collections import defaultdict
+    sector_hits: dict[str, list[dict]] = defaultdict(list)
+
+    for c in candidates:
+        sym = c["symbol"]
+        for sector, syms in _SECTOR_MAP.items():
+            if sym in syms:
+                sector_hits[sector].append(c)
+
+    rotations: list[dict] = []
+    for sector, coins in sector_hits.items():
+        if len(coins) < _SECTOR_MIN_COINS:
+            continue
+        last_fired = cooldown.get(sector, 0)
+        if now_ts - last_fired < _SECTOR_COOLDOWN_HOURS * 3600:
+            age_h = (now_ts - last_fired) / 3600
+            print(f"  ℹ️  Sector {sector} — alerted {age_h:.1f}h ago (cooldown {_SECTOR_COOLDOWN_HOURS}h)")
+            continue
+        coins_sorted = sorted(coins, key=lambda x: -x["vol_ratio"])
+        rotations.append({
+            "sector":        sector,
+            "coins":         coins_sorted,
+            "avg_vol_ratio": round(sum(c["vol_ratio"] for c in coins_sorted) / len(coins_sorted), 1),
+            "coin_count":    len(coins_sorted),
+        })
+
+    return rotations
+
+
+def send_sector_rotation_alerts(
+    rotations: list[dict],
+    fear_greed: dict | None = None,
+) -> None:
+    """
+    Send one Telegram alert per detected sector rotation.
+    Records fire time to enforce cooldown between alerts.
+    """
+    from src.utils.telegram import send_telegram
+
+    if not rotations:
+        return
+
+    data     = _load()
+    now_ts   = time.time()
+    cooldown = data.setdefault("sector_rotation_ts", {})
+
+    for rot in rotations:
+        sector    = rot["sector"]
+        coins     = rot["coins"]
+        emoji     = _SECTOR_EMOJI.get(sector, "📊")
+        best      = coins[0]
+        others    = coins[1:]
+
+        fg_line = ""
+        if fear_greed:
+            fg_val = fear_greed.get("value", 50)
+            if fg_val < 25:
+                fg_line = f"\n  ⚠️  F&amp;G = {fg_val} (Extreme Fear) — rotation may be brief"
+
+        best_price = _fmt_price(best["price"])
+        coin_lines = (
+            f"  🥇 <b>{best['symbol']}</b> ({best['name']})  "
+            f"{best_price}  {best['change_24h']:+.1f}%  vol {best['vol_ratio']:.0f}x"
+        )
+        for c in others[:2]:
+            coin_lines += (
+                f"\n  ▪️  {c['symbol']:8s}  {c['change_24h']:+.1f}%  vol {c['vol_ratio']:.0f}x"
+            )
+        if len(coins) > 3:
+            coin_lines += f"\n  +{len(coins) - 3} more in sector"
+
+        msg = (
+            f"{emoji} <b>SECTOR ROTATION — {sector.upper()}</b>\n\n"
+            f"  {rot['coin_count']} coins spiking simultaneously  "
+            f"(avg vol {rot['avg_vol_ratio']:.0f}x normal)\n\n"
+            f"{coin_lines}"
+            f"{fg_line}\n\n"
+            f"  💡 Capital rotating into <b>{sector}</b> narrative.\n"
+            f"  Best entry: <b>{best['symbol']}</b> (highest vol ratio)\n"
+            f"  🛑 Exit: same rules as whale rides (24h &lt; +5% OR RSI &gt; 85)\n"
+            f"  ⚠️ Manual trade only — sector rotation can reverse fast"
+        )
+
+        try:
+            ok = send_telegram(msg)
+        except Exception as e:
+            print(f"  ⚠️  Sector rotation alert failed ({sector}): {e}")
+            ok = False
+
+        if ok:
+            cooldown[sector] = now_ts
+            print(f"  {emoji} SECTOR ROTATION alert: {sector.upper()} "
+                  f"({len(coins)} coins, avg {rot['avg_vol_ratio']:.0f}x) — best: {best['symbol']}")
+
+    data["sector_rotation_ts"] = cooldown
+    _save(data)
 
 
 # ── Late-stage watchlist + post-crash bounce ──────────────────────────────────

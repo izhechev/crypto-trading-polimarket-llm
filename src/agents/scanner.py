@@ -8,8 +8,194 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import config
-from src.connectors.coingecko import fetch_ohlcv
+from src.connectors.coingecko import fetch_ohlcv as _cg_fetch_ohlcv
+from src.connectors.coinpaprika import (
+    fetch_tickers_for_scanner as _cp_fetch_tickers,
+    fetch_ohlcv as _cp_fetch_ohlcv,
+    _build_cg_id_map as _cp_build_cg_id_map,
+)
 from src.agents.technical_analyst import compute_ta
+
+
+def fetch_ohlcv(coin_id: str, days: int = 30) -> list[dict]:
+    """Backwards-compat shim used by callers outside scanner.py."""
+    return _cg_fetch_ohlcv(coin_id, days)
+
+
+def _fetch_ohlcv_binance(symbol: str, days: int) -> list[dict]:
+    """Binance public klines — free, no key, covers most coins via {SYM}USDT."""
+    import httpx as _hx
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        resp = _hx.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": f"{symbol}USDT", "interval": "1d", "limit": min(days + 2, 1000)},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return []
+        result = []
+        for c in resp.json():
+            try:
+                result.append({
+                    "timestamp": _dt.fromtimestamp(c[0] / 1000, tz=_tz.utc).replace(tzinfo=None),
+                    "open":  float(c[1]),
+                    "high":  float(c[2]),
+                    "low":   float(c[3]),
+                    "close": float(c[4]),
+                })
+            except (ValueError, IndexError):
+                continue
+        return result
+    except Exception:
+        return []
+
+
+def _fetch_ohlcv_kucoin(symbol: str, days: int) -> list[dict]:
+    """KuCoin public klines — free, no key, covers long-tail coins."""
+    import httpx as _hx
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        end_ts   = int(_time.time())
+        start_ts = end_ts - days * 86400
+        resp = _hx.get(
+            "https://api.kucoin.com/api/v1/market/candles",
+            params={"symbol": f"{symbol}-USDT", "type": "1day",
+                    "startAt": start_ts, "endAt": end_ts},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return []
+        raw = resp.json().get("data") or []
+        result = []
+        for c in raw:
+            try:
+                result.append({
+                    "timestamp": _dt.fromtimestamp(int(c[0]), tz=_tz.utc).replace(tzinfo=None),
+                    "open":  float(c[1]),
+                    "close": float(c[2]),
+                    "high":  float(c[3]),
+                    "low":   float(c[4]),
+                })
+            except (ValueError, IndexError):
+                continue
+        return result
+    except Exception:
+        return []
+
+
+def _fetch_ohlcv_okx(symbol: str, days: int) -> list[dict]:
+    """OKX public candles — free, no key, covers CORE and most altcoins."""
+    import httpx as _hx
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        resp = _hx.get(
+            "https://www.okx.com/api/v5/market/candles",
+            params={"instId": f"{symbol}-USDT", "bar": "1D", "limit": min(days + 2, 300)},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return []
+        raw = resp.json().get("data") or []
+        result = []
+        for c in raw:
+            try:
+                result.append({
+                    "timestamp": _dt.fromtimestamp(int(c[0]) / 1000, tz=_tz.utc).replace(tzinfo=None),
+                    "open":  float(c[1]),
+                    "high":  float(c[2]),
+                    "low":   float(c[3]),
+                    "close": float(c[4]),
+                })
+            except (ValueError, IndexError):
+                continue
+        result.sort(key=lambda x: x["timestamp"])  # OKX returns newest-first
+        return result
+    except Exception:
+        return []
+
+
+def _fetch_ohlcv_kraken(symbol: str, days: int) -> list[dict]:
+    """Kraken public OHLC — free, no key, good coverage of major/mid-cap coins."""
+    import httpx as _hx
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        for pair in (f"{symbol}USD", f"{symbol}USDT"):
+            resp = _hx.get(
+                "https://api.kraken.com/0/public/OHLC",
+                params={"pair": pair, "interval": 1440},
+                timeout=15,
+            )
+            d = resp.json()
+            if d.get("error"):
+                continue
+            result_data = d.get("result", {})
+            keys = [k for k in result_data if k != "last"]
+            if not keys:
+                continue
+            raw = result_data[keys[0]]
+            result = []
+            for c in raw:
+                try:
+                    result.append({
+                        "timestamp": _dt.fromtimestamp(int(c[0]), tz=_tz.utc).replace(tzinfo=None),
+                        "open":  float(c[1]),
+                        "high":  float(c[2]),
+                        "low":   float(c[3]),
+                        "close": float(c[4]),
+                    })
+                except (ValueError, IndexError):
+                    continue
+            if result:
+                return result[-days:]  # Kraken returns up to 720 — trim to requested days
+        return []
+    except Exception:
+        return []
+
+
+_MIN_CANDLES = 14   # minimum candles needed for reliable RSI/MACD
+
+
+# Pre-built CG ID map — populated once per scan in run_smart_scanner, reused per-coin.
+_cg_id_cache: dict[str, str] = {}
+
+def _fetch_ohlcv_for_coin(coin: dict, days: int = 30) -> list[dict]:
+    """
+    Fetch OHLCV with multi-source fallback chain:
+    CoinGecko (static ID) → CoinGecko (search) → Binance → KuCoin → OKX → Kraken
+    """
+    from src.connectors.coingecko import search_cg_id as _cg_search
+
+    sym   = coin.get("symbol", "").upper()
+    cg_id = coin.get("_cg_id") or (coin.get("id") if not coin.get("_cp_id") else "")
+    if not cg_id:
+        cg_id = _cg_id_cache.get(sym, "")
+
+    if cg_id:
+        data = _cg_fetch_ohlcv(cg_id, days)
+        if data and len(data) >= _MIN_CANDLES:
+            return data
+
+    found_id = _cg_search(sym)
+    if found_id and found_id != cg_id:
+        data = _cg_fetch_ohlcv(found_id, days)
+        if data and len(data) >= _MIN_CANDLES:
+            return data
+
+    # Exchange fallbacks — free, no key required
+    for _fetcher, _source in (
+        (_fetch_ohlcv_binance, "Binance"),
+        (_fetch_ohlcv_kucoin,  "KuCoin"),
+        (_fetch_ohlcv_okx,     "OKX"),
+        (_fetch_ohlcv_kraken,  "Kraken"),
+    ):
+        data = _fetcher(sym, days)
+        if data and len(data) >= _MIN_CANDLES:
+            print(f" [{_source}]", end="", flush=True)
+            return data
+
+    return []
 
 STABLECOINS = {
     "USDT", "USDC", "DAI", "BUSD", "TUSD", "USDD", "FDUSD", "PYUSD",
@@ -189,40 +375,6 @@ _COIN_ALIASES: dict[str, list[str]] = {
     "ZEC":   ["Zcash"],
 }
 
-# Kraken uses non-standard tickers for a few coins
-_KRAKEN_REMAP = {"XBT": "BTC", "XDG": "DOGE"}
-
-
-def _get_kraken_symbols() -> set[str]:
-    """Fetch available base currencies from Kraken public API (no auth needed)."""
-    try:
-        url = "https://api.kraken.com/0/public/AssetPairs"
-        with httpx.Client(timeout=15) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-
-        bases = set()
-        for pair in data.get("result", {}).values():
-            wsname = pair.get("wsname", "")
-            if "/" in wsname:
-                base = wsname.split("/")[0]
-                base = _KRAKEN_REMAP.get(base, base)
-                bases.add(base.upper())
-        return bases
-    except Exception as e:
-        print(f"  Warning: Kraken API failed ({e}), using fallback list")
-        return {
-            "BTC", "ETH", "SOL", "ADA", "DOT", "LINK", "AVAX", "ATOM", "XRP",
-            "LTC", "BCH", "UNI", "AAVE", "MKR", "COMP", "YFI", "GRT", "FIL",
-            "EOS", "XTZ", "ALGO", "XLM", "TRX", "VET", "ETC", "XMR", "ZEC",
-            "DASH", "MANA", "SAND", "AXS", "FLOW", "CHZ", "ENJ", "LRC", "STORJ",
-            "OCEAN", "KAVA", "CRV", "1INCH", "SUSHI", "SNX", "ZRX", "BAT",
-            "MATIC", "NEAR", "FTM", "HBAR", "ICP", "EGLD", "THETA", "KSM",
-            "RUNE", "INJ", "OP", "ARB", "SUI", "APT", "TIA", "SEI", "PYTH",
-            "WIF", "BONK", "PEPE", "RENDER", "STX", "IMX", "BLUR", "ENS",
-        }
-
 
 def _get_binance_symbols() -> set[str]:
     """Fetch available base currencies from Binance (USDT pairs)."""
@@ -250,12 +402,44 @@ def _get_revolut_symbols() -> set[str]:
     return set(config.REVOLUT_X_COINS)
 
 
-def _fetch_top_250(pages: int = 1) -> list[dict]:
-    """Fetch top coins by market cap from CoinGecko /coins/markets.
+def _get_kraken_symbols() -> set[str]:
+    """Fetch base currencies from Kraken public AssetPairs endpoint."""
+    try:
+        import httpx as _httpx
+        with _httpx.Client(timeout=10) as _c:
+            r = _c.get("https://api.kraken.com/0/public/AssetPairs",
+                       params={"info": "leverage"})
+        if r.status_code == 200:
+            data = r.json().get("result", {})
+            syms: set[str] = set()
+            for pair_info in data.values():
+                base = (pair_info.get("base") or "").upper()
+                # Kraken prefixes with X/Z for legacy pairs; strip them
+                if len(base) > 3 and base[0] in ("X", "Z"):
+                    base = base[1:]
+                if base and base not in ("ZUSD", "ZEUR", "ZGBP", "ZJPY"):
+                    syms.add(base)
+            return syms
+    except Exception:
+        pass
+    # Fallback: known Kraken-listed assets
+    return {
+        "BTC", "ETH", "SOL", "XRP", "ADA", "DOT", "LINK", "AVAX", "ATOM",
+        "LTC", "BCH", "UNI", "AAVE", "MKR", "GRT", "CRV", "SNX", "FIL",
+        "INJ", "NEAR", "OP", "ARB", "SUI", "APT", "TIA", "PEPE", "DOGE",
+        "SHIB", "MATIC", "FTM", "ALGO", "XLM", "TRX", "ETC", "AXS", "FET",
+        "WIF", "BONK", "JUP", "PENDLE", "ICP", "HBAR", "VET", "RUNE", "ENA",
+        "IMX", "COMP", "BAT", "ZEC", "DASH", "XMR", "OCEAN", "AGIX",
+    }
 
-    pages=1  → top 250  (default, all-exchange scan)
-    pages=4  → top 1000 (Kraken scan — more candidates after exchange filter)
-    """
+
+def _fetch_top_coinpaprika(limit: int = 1000) -> list[dict]:
+    """Fetch top coins from CoinPaprika (primary source). Single request, no pagination."""
+    return _cp_fetch_tickers(limit=limit)
+
+
+def _fetch_top_250_coingecko(pages: int = 1) -> list[dict]:
+    """Fetch top coins from CoinGecko (fallback). pages=1→250, pages=4→1000."""
     url = "https://api.coingecko.com/api/v3/coins/markets"
     headers = {}
     if config.COINGECKO_API_KEY:
@@ -277,10 +461,15 @@ def _fetch_top_250(pages: int = 1) -> list[dict]:
             batch = resp.json()
             all_coins.extend(batch)
             if len(batch) < 250:
-                break  # last page returned fewer than requested — we're done
+                break
             if page < pages:
-                time.sleep(1.2)  # stay within CoinGecko free-tier rate limit
+                time.sleep(1.2)
     return all_coins
+
+
+def _fetch_top_250(pages: int = 1) -> list[dict]:
+    """Backwards-compat alias — uses CoinGecko directly (used by non-scanner callers)."""
+    return _fetch_top_250_coingecko(pages)
 
 
 def _check_rug_pull(coin: dict) -> tuple[bool, str]:
@@ -383,25 +572,96 @@ def _check_wash_trading(coin: dict, ohlcv: list[dict]) -> tuple[bool, str]:
 
 
 def _quick_score(coin: dict, trending_symbols: set[str] | None = None) -> tuple[int, list[str]]:
-    """Score from market data alone (no OHLCV needed)."""
-    score = 0
-    reasons = []
+    """
+    Pre-filter score using bulk market data only (no OHLCV needed).
+    Selects the 60 best candidates before expensive OHLCV/TA fetch.
 
+    Uses every field already in the bulk response so the top-200 set
+    is as close as possible to what full TA would rank highly.
+    """
+    score = 0
+    reasons: list[str] = []
+
+    sym        = coin.get("symbol", "").upper()
     change_7d  = coin.get("price_change_percentage_7d_in_currency") or 0
+    change_24h = coin.get("price_change_percentage_24h") or 0
     volume     = coin.get("total_volume") or 0
     market_cap = coin.get("market_cap") or 1
+    ath_pct    = coin.get("ath_change_percentage") or 0   # negative = below ATH
+    circ       = coin.get("circulating_supply") or 0
+    total_s    = coin.get("total_supply") or 0
+    vm         = volume / market_cap
 
-    if change_7d < -15:
-        score += 1
-        reasons.append(f"7d dip {change_7d:.1f}%")
+    # Hard pre-exclude: already pumped >200% or micro-cap (<$500k) — waste of TA slots
+    if change_7d > 200:
+        return -99, ["already pumped >200% 7d"]
+    if 0 < market_cap < 500_000:
+        return -99, ["micro-cap <$500k"]
+    # Hard pre-exclude: circulating supply < 15% (unlock risk)
+    if total_s > 0 and circ > 0 and (circ / total_s) < 0.15:
+        return -99, ["circ supply <15%"]
 
-    if volume > market_cap * 0.1:
+    # ── 7d dip depth (oversold bounce signal) ─────────────────────────────
+    if change_7d < -50:
+        score += 3
+        reasons.append(f"deep 7d dip {change_7d:.0f}% (+3)")
+    elif change_7d < -30:
+        score += 2
+        reasons.append(f"7d dip {change_7d:.0f}% (+2)")
+    elif change_7d < -15:
         score += 1
-        reasons.append(f"vol/mcap {volume/market_cap:.2f}x")
+        reasons.append(f"7d dip {change_7d:.0f}% (+1)")
+    elif change_7d > 30:
+        score -= 1
+        reasons.append(f"7d already up {change_7d:.0f}% (-1)")
 
-    if trending_symbols and coin.get("symbol", "").upper() in trending_symbols:
+    # ── Volume / market-cap ratio (buying pressure) ────────────────────────
+    if vm > 0.50:
+        score += 3
+        reasons.append(f"vol/mcap {vm:.2f}x (+3)")
+    elif vm > 0.30:
+        score += 2
+        reasons.append(f"vol/mcap {vm:.2f}x (+2)")
+    elif vm > 0.10:
         score += 1
-        reasons.append("CMC trending")
+        reasons.append(f"vol/mcap {vm:.2f}x (+1)")
+    elif vm < 0.02:
+        score -= 1
+        reasons.append(f"vol/mcap {vm:.3f}x dead (+−1)")
+
+    # ── 24h momentum ──────────────────────────────────────────────────────
+    if 2 <= change_24h <= 15:
+        score += 1
+        reasons.append(f"24h momentum {change_24h:+.1f}% (+1)")
+    elif change_24h > 15:
+        score -= 1
+        reasons.append(f"24h already up {change_24h:+.1f}% (-1)")
+    elif change_24h < -5:
+        score -= 1
+        reasons.append(f"24h bleeding {change_24h:+.1f}% (-1)")
+
+    # ── ATH distance (coiled spring potential) ─────────────────────────────
+    if ath_pct < -90:
+        score += 2
+        reasons.append(f"ATH {ath_pct:.0f}% — coiled spring (+2)")
+    elif ath_pct < -70:
+        score += 1
+        reasons.append(f"ATH {ath_pct:.0f}% discount (+1)")
+
+    # ── Oversold proxy: sharp 7d + 24h both negative → likely oversold ────
+    if change_7d < -20 and change_24h < -3:
+        score += 1
+        reasons.append("oversold proxy: 7d+24h both down (+1)")
+
+    # ── CMC trending ──────────────────────────────────────────────────────
+    if trending_symbols and sym in trending_symbols:
+        score += 1
+        reasons.append("CMC trending (+1)")
+
+    # ── SEC/CFTC commodity (known regulatory safety) ──────────────────────
+    if sym in SEC_COMMODITY_TOKENS:
+        score += 1
+        reasons.append("SEC/CFTC commodity (+1)")
 
     return score, reasons
 
@@ -765,8 +1025,11 @@ def _build_approaching_tp_set(current_prices: dict[str, float], threshold_pct: f
 
 PUMP_WATCHLIST_PATH = config.DATA_DIR / "pump_watchlist.json"
 # Position sizing for auto whale ride entries
-WHALE_RIDE_MAX_EUR  = 16.0   # max € per position (portfolio / 5)
-WHALE_CRASH_TRIGGER = 0.60   # require >60% crash from pump peak before entry
+WHALE_RIDE_MAX_EUR       = 16.0   # max € per position (portfolio / 5)
+WHALE_CRASH_TRIGGER      = 0.60   # >60% crash from peak → standard whale ride (TP +100%, SL -15%)
+WHALE_CRASH_RISKY_MIN    = 0.40   # 40-60% crash → risky ride (TP +50%, SL -10%)
+WHALE_CRASH_RISKY_MAX    = 0.60
+WHALE_RISKY_MAX_MCAP_USD = 50_000_000   # only for coins < $50M mcap (high volatility tier)
 
 
 def _load_pump_watchlist() -> dict:
@@ -898,9 +1161,28 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
     auto_rides: list[dict] = []
     triggered:  list[str]  = []
 
+    # Load already-open WHALE_RIDE symbols so we don't re-trigger the same position
+    _open_whale_syms: set[str] = set()
+    try:
+        import csv as _csv_cw
+        _rec_path = config.DATA_DIR / "recommendations.csv"
+        if _rec_path.exists():
+            with open(_rec_path, newline="", encoding="utf-8") as _rf:
+                _open_whale_syms = {
+                    r.get("coin", "").upper()
+                    for r in _csv_cw.DictReader(_rf)
+                    if r.get("type") == "WHALE_RIDE" and r.get("status") == "OPEN"
+                }
+    except Exception:
+        pass
+
     for sym, entry in watchlist.items():
         if sym in WASH_TRADING_CONFIRMED or sym in PERMANENTLY_EXCLUDED:
             continue   # never auto-ride confirmed wash traders or permanently excluded coins
+        # Already open as a WHALE_RIDE — clean up watchlist entry silently
+        if sym in _open_whale_syms:
+            triggered.append(sym)
+            continue
         coin = coin_map.get(sym)
         if not coin:
             continue
@@ -910,20 +1192,23 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
             continue
 
         drop_from_peak = (current - peak) / peak  # negative value
-        if drop_from_peak <= -WHALE_CRASH_TRIGGER:
+        abs_drop = abs(drop_from_peak)
+        mcap = coin.get("market_cap") or 0
+
+        if abs_drop >= WHALE_CRASH_TRIGGER:
+            # Standard whale ride: >60% crash, TP +100%, SL -15%
             prev_trades = _get_previous_closed_trades(sym)
             prev_wins   = [t for t in prev_trades if t.get("status") == "WIN"]
             known_cycles = [f"{float(t['pnl_pct']):+.0f}%" for t in prev_wins if t.get("pnl_pct")]
-
             auto_rides.append({
                 "symbol":         sym,
                 "name":           entry.get("name", sym),
                 "coin_id":        coin.get("id", ""),
                 "price":          current,
                 "entry":          current,
-                "stop_loss":      round(current * 0.75, 8),   # -25%
+                "stop_loss":      round(current * 0.85, 8),   # -15% pre-milestone
                 "take_profit":    round(current * 2.00, 8),   # +100%
-                "crash_reason":   f"pump {entry.get('peak_7d', 0):+.0f}% → crash {drop_from_peak*100:.0f}% from peak",
+                "crash_reason":   f"pump {entry.get('peak_7d', 0):+.0f}% → crash {abs_drop*100:.0f}% from peak",
                 "max_hold_hours": 48,
                 "is_serial_scam": False,
                 "allies":         [],
@@ -935,6 +1220,37 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
                 "max_eur":        WHALE_RIDE_MAX_EUR,
                 "entry_type":     "auto_watchlist",
                 "drop_from_peak": round(drop_from_peak * 100, 1),
+                "ride_tier":      "standard",
+            })
+            triggered.append(sym)
+
+        elif (WHALE_CRASH_RISKY_MIN <= abs_drop < WHALE_CRASH_RISKY_MAX
+              and mcap > 0 and mcap < WHALE_RISKY_MAX_MCAP_USD):
+            # Risky whale ride: 40-60% crash on small-cap, TP +50%, SL -10%
+            prev_trades = _get_previous_closed_trades(sym)
+            prev_wins   = [t for t in prev_trades if t.get("status") == "WIN"]
+            known_cycles = [f"{float(t['pnl_pct']):+.0f}%" for t in prev_wins if t.get("pnl_pct")]
+            auto_rides.append({
+                "symbol":         sym,
+                "name":           entry.get("name", sym),
+                "coin_id":        coin.get("id", ""),
+                "price":          current,
+                "entry":          current,
+                "stop_loss":      round(current * 0.90, 8),   # -10% tight SL
+                "take_profit":    round(current * 1.50, 8),   # +50% TP
+                "crash_reason":   f"partial crash {abs_drop*100:.0f}% from peak (risky ride)",
+                "max_hold_hours": 24,
+                "is_serial_scam": False,
+                "allies":         [],
+                "known_cycles":   known_cycles,
+                "cycle_number":   len(prev_trades) + 1,
+                "prev_wins":      prev_wins,
+                "change_24h":     coin.get("price_change_percentage_24h") or 0,
+                "change_7d":      coin.get("price_change_percentage_7d_in_currency") or 0,
+                "max_eur":        WHALE_RIDE_MAX_EUR / 2,   # half size for risky tier
+                "entry_type":     "auto_watchlist_risky",
+                "drop_from_peak": round(drop_from_peak * 100, 1),
+                "ride_tier":      "risky",
             })
             triggered.append(sym)
 
@@ -984,6 +1300,7 @@ def _build_whale_ride(coin: dict, crash_reason: str, prev_trades: list[dict]) ->
         "prev_wins":      prev_wins,
         "change_24h":     coin.get("price_change_percentage_24h") or 0,
         "change_7d":      coin.get("price_change_percentage_7d_in_currency") or 0,
+        "market_cap":     coin.get("market_cap") or 0,
     }
 
 
@@ -1034,8 +1351,10 @@ def _get_open_positions(current_prices: dict[str, float]) -> list[dict]:
             current = current_prices.get(sym, 0.0)
             pnl_pct = ((current - entry) / entry * 100) if entry > 0 and current > 0 else None
             is_stale = (
-                (age_days >= 7  and (pnl_pct is None or pnl_pct < 3.0))
-                or (age_days > 10 and (pnl_pct is None or pnl_pct < 5.0))
+                pnl_pct is not None and (
+                    (age_days >= 7  and pnl_pct < 3.0)
+                    or (age_days > 10 and pnl_pct < 5.0)
+                )
             )
             is_approaching_tp = pnl_pct is not None and pnl_pct >= 8.0
             is_critical_loss  = pnl_pct is not None and pnl_pct <= -8.0
@@ -1061,45 +1380,41 @@ def run_smart_scanner(
     exchange: str | None = None,
     fear_greed: dict | None = None,
     open_count: int = 0,
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], int, dict]:
     """
     Fetch top coins, exclude stablecoins/wrapped tokens, optionally filter
     by exchange, score by TA opportunity.
 
-    Returns (top10, pump_alerts, whale_rides).
-    exchange:    None (no filter) | "kraken" | "revolut" | "both"
+    Returns (top10, pump_alerts, whale_rides, quality_count, catalysts).
+    exchange:    None (no filter) | "revolut" | "binance" | "all"
     fear_greed:  dict with "value" (0-100) and "label" — used for macro filter
-
-    Fetches top 1000 when exchange=kraken (4 pages) to maximise candidates
-    after exchange filter; all other modes fetch top 250 (1 page).
     """
     label    = exchange.upper() if exchange else "ALL EXCHANGES"
     fg_value = (fear_greed or {}).get("value", 50)   # 0-100; used for macro gates below
-    # Always fetch 1000 coins — strict TA + gate filters remove most, need a large pool
+    # Fetch 3000 coins — CP sorts strictly by market cap, pump coins can sit at rank 1001-3000
+    # while CoinGecko ranked them higher due to activity weighting. TA loop touches top 200
+    # candidates (quick_score cap) — sized to stay within the CoinGecko pro 100k/month budget.
     _pages = 4
-    _top_n = 1000
+    _top_n = 3000
     print("\n" + "=" * 60)
     print(f"  SMART SCANNER — Top {_top_n} Coins [{label}]")
     print("=" * 60)
+
+    from src.connectors.coingecko import get_eur_usd_rate as _get_eur_rate
+    _eur = _get_eur_rate()
 
     # 1. Build allowed symbol set (None = no exchange filter)
     allowed: set[str] | None = None
     if exchange:
         ex = exchange.lower()
-        if ex == "kraken":
-            print("\n  Fetching Kraken tradeable pairs...")
-            allowed = _get_kraken_symbols()
-        elif ex == "binance":
+        if ex == "binance":
             print("\n  Fetching Binance tradeable pairs...")
             allowed = _get_binance_symbols()
         elif ex == "revolut":
             allowed = _get_revolut_symbols()
-        elif ex == "both":
-            print("\n  Fetching Kraken tradeable pairs...")
-            allowed = _get_kraken_symbols() | _get_revolut_symbols()
         elif ex == "all":
             print("\n  Fetching all exchange pairs...")
-            allowed = _get_kraken_symbols() | _get_revolut_symbols() | _get_binance_symbols()
+            allowed = _get_revolut_symbols() | _get_binance_symbols()
         if allowed is not None:
             print(f"  {len(allowed)} unique base assets on {label}")
 
@@ -1113,14 +1428,30 @@ def run_smart_scanner(
     except Exception:
         pass
 
-    # 2. Top coins market data (250 default, 1000 for Kraken)
-    print(f"  Fetching top {_top_n} from CoinGecko ({_pages} page{'s' if _pages > 1 else ''})...")
+    # 2. Top coins market data — CoinPaprika (primary, single free request), CoinGecko fallback
+    _cp_ok = False
+    coins: list[dict] = []
+    print(f"  Fetching top {_top_n} from CoinPaprika (primary)...")
     try:
-        coins = _fetch_top_250(pages=_pages)
+        coins = _fetch_top_coinpaprika(limit=_top_n)
+        if coins:
+            _cp_ok = True
+            print(f"  Got {len(coins)} coins from CoinPaprika")
     except Exception as e:
-        print(f"  ERROR: {e}")
-        return [], []
-    print(f"  Got {len(coins)} coins")
+        print(f"  CoinPaprika failed: {e} — falling back to CoinGecko")
+
+    if not coins:
+        print(f"  Fetching top 1000 from CoinGecko ({_pages} page{'s' if _pages > 1 else ''})...")
+        try:
+            coins = _fetch_top_250_coingecko(pages=_pages)
+            print(f"  Got {len(coins)} coins from CoinGecko")
+        except Exception as e:
+            print(f"  ERROR: CoinGecko also failed: {e}")
+            return [], [], [], 0, {}
+
+    if not coins:
+        print("  ERROR: no coin data from any source")
+        return [], [], [], 0, {}
 
     # 3. Filter out stablecoins, wrapped tokens, tokenized stocks, wash traders, and permanently excluded
     excluded = STABLECOINS | WRAPPED_TOKENS | TOKENIZED_STOCKS | WASH_TRADING_CONFIRMED | PERMANENTLY_EXCLUDED
@@ -1204,28 +1535,18 @@ def run_smart_scanner(
     pump_coins = raw_pump_coins
 
     # 4d. Exclude coins already in the user's portfolio (no point recommending what's owned)
-    # Try Kraken live first, fall back to portfolio.json
     portfolio_in_scan = 0   # count of held coins that appear in the scan universe
     portfolio_symbols: set[str] = set()
     try:
-        from src.connectors.kraken import fetch_kraken_portfolio
-        kraken_holdings, kraken_src = fetch_kraken_portfolio()
-        if kraken_holdings:
-            portfolio_symbols = {h["asset"].upper() for h in kraken_holdings}
-            print(f"  Portfolio exclusion from {kraken_src}: {', '.join(sorted(portfolio_symbols))}")
+        with open(config.PORTFOLIO_PATH) as _pf:
+            portfolio_symbols = {
+                h["asset"].upper()
+                for h in json.load(_pf).get("holdings", [])
+            }
+        if portfolio_symbols:
+            print(f"  Portfolio exclusion from portfolio.json: {', '.join(sorted(portfolio_symbols))}")
     except Exception:
         pass
-    if not portfolio_symbols:
-        try:
-            with open(config.PORTFOLIO_PATH) as _pf:
-                portfolio_symbols = {
-                    h["asset"].upper()
-                    for h in json.load(_pf).get("holdings", [])
-                }
-            if portfolio_symbols:
-                print(f"  Portfolio exclusion from portfolio.json: {', '.join(sorted(portfolio_symbols))}")
-        except Exception:
-            pass
     if portfolio_symbols:
         pre_pf = len(exchange_coins)
         exchange_coins = [
@@ -1238,7 +1559,7 @@ def run_smart_scanner(
             print(f"  🚫 {excluded_pf} portfolio coin(s) excluded")
 
     # 4d-2. Also exclude coins with OPEN scanner recommendations.
-    # Kraken/portfolio.json only tracks actual held coins; recommendations.csv tracks
+    # portfolio.json only tracks actual held coins; recommendations.csv tracks
     # bot-logged entries. Without this, a coin like ARB can appear as a "new" pick
     # even while it already has an OPEN recommendation.
     _open_scanner_syms:  set[str] = set()  # used later to guard whale_rides building
@@ -1335,13 +1656,15 @@ def run_smart_scanner(
         print(f"  🐋 {len(whale_rides)} whale ride candidate(s)")
     exchange_coins = safe_coins
 
-    # 5. Quick-score all, take top 40 for OHLCV analysis
+    # 5. Pre-filter score all, take top 200 for OHLCV/TA analysis
     quick_scored = []
     for coin in exchange_coins:
         qs, qr = _quick_score(coin, trending_symbols)
+        if qs == -99:
+            continue   # hard pre-exclude (pumped/micro-cap/low-float)
         quick_scored.append((coin, qs, qr))
     quick_scored.sort(key=lambda x: x[1], reverse=True)
-    candidates = quick_scored[:60]
+    candidates = quick_scored[:250]
 
     # 5b. Compute sector averages from the full coin list (narrative momentum)
     sector_avgs = _compute_sector_avgs(exchange_coins)
@@ -1363,8 +1686,17 @@ def run_smart_scanner(
     except Exception as e:
         print(f"  News fetch skipped: {e}")
 
-    # 6. Fetch OHLCV + compute TA for each candidate
-    print(f"\n  Computing TA for {len(candidates)} candidates (~{len(candidates) * 2}s, top60 by quick score)...")
+    # 6. Pre-build CG ID map once (avoids one CG API call per coin in the loop)
+    global _cg_id_cache
+    try:
+        _cg_id_cache = _cp_build_cg_id_map()
+        print(f"  CG ID map loaded ({len(_cg_id_cache)} symbols)")
+    except Exception as _cg_map_e:
+        print(f"  CG ID map failed ({_cg_map_e}) — using static map only")
+        _cg_id_cache = {}
+
+    # 6b. Fetch OHLCV + compute TA for each candidate
+    print(f"\n  Computing TA for {len(candidates)} candidates (top250 by pre-filter score)...")
     results      = []
     wash_trading = []  # symbols excluded for wash trading
     _bearish_skip_count = 0       # tracks market-wide bearish alignment skips
@@ -1372,16 +1704,18 @@ def run_smart_scanner(
     for i, (coin, qs, qr) in enumerate(candidates):
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
+        print(f"  [{i+1}/{len(candidates)}] {symbol:<12} score={qs:+d}  fetching OHLCV...", end="", flush=True)
         try:
-            ohlcv = fetch_ohlcv(coin_id, days=30)
-            if not ohlcv or len(ohlcv) < 20:
-                continue
+            ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
+            if not ohlcv or len(ohlcv) < _MIN_CANDLES:
+                print(f" ⚠️  no OHLCV — continuing with neutral TA (RSI/MACD unknown)")
+                ohlcv = []  # compute_ta handles empty list → neutral signals
 
             # Wash trading check — runs before TA to avoid wasting cycles
             is_wash, wash_reason = _check_wash_trading(coin, ohlcv)
             if is_wash:
                 wash_trading.append((symbol, wash_reason))
-                print(f"  ⚠️  WASH TRADING: {symbol} — {wash_reason}")
+                print(f" ⚠️  WASH TRADING — {wash_reason}")
                 continue
 
             ta    = compute_ta(coin_id, symbol, ohlcv)
@@ -1469,24 +1803,33 @@ def run_smart_scanner(
                 print(f"  ❌ SKIP {symbol}: already pumped +{change_7d:.0f}% 7d — whale ride territory, not scanner")
                 continue
 
-            # Gate: full bearish alignment — skip only if ALL FOUR conditions are true:
-            #   1. MACD bearish  2. Trend bearish  3. 7d < -10%  4. 24h < -3%
-            # This keeps coins like PEPE/FLOKI/CHZ that are technically bearish but not crashing.
-            # Auto-relax: if >50% of candidates already hit this gate, widen to 7d < -15% only
-            #   (market-wide extreme fear — MACD lag is unreliable, price action governs).
+            # Gate: full bearish alignment — skip only if ALL conditions AND not oversold.
+            # Oversold coins (RSI < 45) are EXEMPTED: bearish trend on an oversold coin
+            # is the contrarian SETUP we want, not a reason to skip.
+            _rsi_val = ta.rsi_14 if ta.rsi_14 is not None else 50
+            _oversold_exempt = _rsi_val < 45
             _market_wide_bearish = _bearish_skip_count >= len(candidates) * 0.5
             if _market_wide_bearish:
                 if not _market_wide_announced:
-                    print("  ⚠️ MARKET-WIDE BEARISH — filter relaxed (skip only if 7d < -15%)")
+                    print("  ⚠️ MARKET-WIDE BEARISH — filter relaxed (only hard-crash coins skipped)")
                     _market_wide_announced = True
-                if change_7d < -15:
+                if change_7d < -15 and change_24h_raw < -8 and not _oversold_exempt:
                     _bearish_skip_count += 1
-                    print(f"  ❌ SKIP {symbol}: market-wide bearish confirmed (7d {change_7d:.1f}% < -15%)")
+                    print(f"  ❌ SKIP {symbol}: market-wide bearish, hard crash (7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
                     continue
             elif (ta.macd_signal == "BEARISH" and trend_val == "BEARISH"
-                  and change_7d < -10 and change_24h_raw < -3):
+                  and change_7d < -10 and change_24h_raw < -5
+                  and not _oversold_exempt):
                 _bearish_skip_count += 1
-                print(f"  ❌ SKIP {symbol}: full bearish alignment (MACD+Trend BEARISH, 7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
+                print(f"  ❌ SKIP {symbol}: full bearish (MACD+Trend BEARISH, 7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
+                continue
+
+            # Gate: extreme fear (F&G < 30) + no MACD bullish = 49% loss rate (data-driven)
+            # Require MACD bullish confirmation when market is in extreme fear — neutral/bearish
+            # MACD in fear means no momentum confirmation and historically near coin-flip losses.
+            if fg_value < 30 and ta.macd_signal != "BULLISH":
+                _write_shadow_log(symbol, 0, f"extreme fear gate (F&G={fg_value}, MACD={ta.macd_signal})")
+                print(f"  ❌ SKIP {symbol}: F&G {fg_value} (extreme fear) — MACD {ta.macd_signal}, not bullish")
                 continue
 
             # Momentum stall flag: MACD bearish + trend neutral → cap score at 2
@@ -1530,11 +1873,9 @@ def run_smart_scanner(
             if raw_score <= 0:
                 continue
 
-            # Score 1 → shadow log AND include in top10 display as context
-            # (Groq pre-filter Step 0G blocks these from becoming new entries;
-            # showing them lets the user see the full market picture)
-            if raw_score == 1:
-                _write_shadow_log(symbol, raw_score, "score=1 (display only, no entry)")
+            # Scores 1-2 → shadow log only; Groq pre-filter (Step 0G) blocks entries for score ≤ 2
+            if raw_score <= 2:
+                _write_shadow_log(symbol, raw_score, f"score={raw_score} (display only, need ≥3 for entry)")
 
             # Momentum stall cap: MACD bearish + trend neutral → score capped at 2
             if momentum_stall and raw_score > 2:
@@ -1615,11 +1956,13 @@ def run_smart_scanner(
             if deep_dip:
                 print(f"  ⭐ DEEP DIP: {symbol} — 7d {change_7d:.1f}%, RSI {ta.rsi_14:.1f}, MACD bullish")
 
+            _price_usd = coin.get("current_price", 0)
             results.append({
                 "coin_id":         coin_id,
                 "symbol":          symbol,
                 "name":            coin.get("name", ""),
-                "price":           coin.get("current_price", 0),
+                "price":           _price_usd,
+                "price_eur":       coin.get("current_price_eur") or _price_usd * _eur,
                 "change_24h":      coin.get("price_change_percentage_24h") or 0,
                 "change_7d":       change_7d,
                 "market_cap":      coin.get("market_cap") or 0,
@@ -1646,12 +1989,13 @@ def run_smart_scanner(
                 "deep_dip":         deep_dip,           # SIREN bonus rule
                 "deep_dip_tb":      deep_dip_tb,        # +1 → prioritized in top 3
             })
-        except Exception:
-            pass
+            rsi_str  = f"RSI={ta.rsi_14:.0f}" if ta.rsi_14 else "RSI=n/a"
+            bb_str   = f"BB={ta.bollinger_position}" if ta.bollinger_position else "BB=n/a"
+            print(f" score={raw_score:+d}  {rsi_str}  {bb_str}  candles={len(ohlcv)}")
+        except Exception as _e:
+            print(f" ERROR: {_e}")
 
-        time.sleep(2)  # Stay within CoinGecko rate limits (~30/min)
-        if (i + 1) % 10 == 0:
-            print(f"    {i+1}/{len(candidates)} done...")
+        time.sleep(0.11 if _cp_ok else 2)  # CP: 10 req/sec; CG: ~30 req/min
 
     if wash_trading:
         print(f"  ⚠️  {len(wash_trading)} wash trading coin(s) excluded from ranking")
@@ -1711,20 +2055,25 @@ def run_smart_scanner(
 
     # 7. Display
     def _pfmt(p: float) -> str:
-        if p >= 1:      return f"${p:,.2f}"
-        if p >= 0.01:   return f"${p:.4f}"
-        if p >= 0.0001: return f"${p:.6f}"
-        return f"${p:.8f}"
+        if p >= 1:      return f"€{p:,.2f}"
+        if p >= 0.01:   return f"€{p:.4f}"
+        if p >= 0.0001: return f"€{p:.6f}"
+        return f"€{p:.8f}"
 
     # ── Stale open position detection ─────────────────────────────────────
     all_coin_prices = {c.get("symbol", "").upper(): c.get("current_price", 0.0) for c in coins}
     open_positions  = _get_open_positions(all_coin_prices)
-    stale_positions = [p for p in open_positions if p["is_stale"]]
+    stale_positions  = [p for p in open_positions if p["is_stale"]]
+    noprice_positions = [p for p in open_positions if p["pnl_pct"] is None and not p["is_stale"]]
     if stale_positions:
         print(f"\n  ⏳  STALE POSITIONS  (≥7d <+3%  or  >10d <+5%)  — TIME EXIT\n" + "-" * 60)
         for p in stale_positions:
-            pnl_str = f"{p['pnl_pct']:+.1f}%" if p["pnl_pct"] is not None else "N/A"
+            pnl_str = f"{p['pnl_pct']:+.1f}%"
             print(f"  ⚠️  {p['symbol']:8s}  age: {p['age_days']}d  |  PnL: {pnl_str}  → FORCE CLOSE at market")
+    if noprice_positions:
+        print(f"\n  ❓  NO PRICE  (not in current feed — check manually)\n" + "-" * 60)
+        for p in noprice_positions:
+            print(f"  ❓  {p['symbol']:8s}  age: {p['age_days']}d  |  PnL: unknown (coin not in scan feed)")
 
     # Fetch 1-sentence news catalysts for top-10 (Perplexity if key set, else top headline)
     _catalysts: dict[str, str] = {}
@@ -1741,7 +2090,7 @@ def run_smart_scanner(
         deep_dip_tag  = "  [⭐ DEEP DIP]" if r.get("deep_dip") else ""
         hold_tag      = "  [📌 OPEN — HOLD]" if r.get("_already_open") else ""
         print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  score: {r['score']} pts{archetype_tag}{deep_dip_tag}{supply_tag}{hold_tag}")
-        print(f"     Price: {_pfmt(r['price'])}  |  24h: {r['change_24h']:+.1f}%  |  7d: {r['change_7d']:+.1f}%")
+        print(f"     Price: {_pfmt(r.get('price_eur') or r['price'] * _eur)}  |  24h: {r['change_24h']:+.1f}%  |  7d: {r['change_7d']:+.1f}%")
         rsi_str = f"RSI {r['rsi']:.1f}" if r['rsi'] else "RSI N/A"
         ath_str = f"ATH {r['ath_pct']:+.0f}%" if r.get('ath_pct') else ""
         spring  = "  [COILED SPRING]" if r.get("coiled_spring") else ""
@@ -1775,7 +2124,7 @@ def run_smart_scanner(
             print(f"\n  📌  HOLD POSITIONS  (filling {needed} slot(s) — fewer than 3 new picks)\n" + "-" * 60)
             for p in hold_fills:
                 pnl_str = f"{p['pnl_pct']:+.1f}%" if p["pnl_pct"] is not None else "N/A"
-                print(f"  📌 {p['symbol']:8s} HOLD  |  entry: ${p['entry']:.4f}  TP: ${p['tp']:.4f}  "
+                print(f"  📌 {p['symbol']:8s} HOLD  |  entry: €{p['entry'] * _eur:.4f}  TP: €{p['tp'] * _eur:.4f}  "
                       f"PnL: {pnl_str}  age: {p['age_days']}d")
 
     # ── Pump alerts — classified display ──────────────────────────────────
@@ -1792,39 +2141,51 @@ def run_smart_scanner(
             if act == "DO_NOT_CHASE":
                 wins = pc.get("prev_wins", [])
                 wins_str = f" [{len(wins)} prev WIN{'s' if len(wins)!=1 else ''}]" if wins else ""
-                print(f"\n  🐋 {sym:8s} {_pfmt(p)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: ${m:.0f}M")
+                print(f"\n  🐋 {sym:8s} {_pfmt(p * _eur)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: €{m:.0f}M")
                 print(f"     DO NOT CHASE — wait for crash >60% from peak, then auto whale ride{wins_str}")
                 print(f"     Reason: {pc['reason']}")
                 print(f"     Watchlisted ✓  |  Target entry: SL -25% / TP +100% / max 48h / max €{WHALE_RIDE_MAX_EUR:.0f}")
             elif act == "MONITORING":
-                print(f"\n  🔍 {sym:8s} {_pfmt(p)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: ${m:.0f}M")
+                print(f"\n  🔍 {sym:8s} {_pfmt(p * _eur)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: €{m:.0f}M")
                 print(f"     NEW PUMP — monitoring for post-crash whale ride opportunity")
                 print(f"     {pc['reason']}")
             else:  # SKIP
-                print(f"\n  ⛔ {sym:8s} {_pfmt(p)}  |  7d: {ch7d:+.0f}%  — SKIP — {pc['reason']}")
+                print(f"\n  ⛔ {sym:8s} {_pfmt(p * _eur)}  |  7d: {ch7d:+.0f}%  — SKIP — {pc['reason']}")
 
     # ── Auto whale rides from pump watchlist ──────────────────────────────
     all_whale_rides = whale_rides + auto_watchlist_rides
     if auto_watchlist_rides:
         print(f"\n  🐋  AUTO WHALE RIDE — crash triggered from watchlist\n" + "-" * 60)
         for wr in auto_watchlist_rides:
-            sym  = wr["symbol"]
-            p    = wr["price"]
-            sl   = wr["stop_loss"]
-            tp   = wr["take_profit"]
-            drop = wr.get("drop_from_peak", 0)
+            sym   = wr["symbol"]
+            p     = wr["price"]
+            sl    = wr["stop_loss"]
+            tp    = wr["take_profit"]
+            drop  = wr.get("drop_from_peak", 0)
+            tier  = wr.get("ride_tier", "standard")
             cycles_str = " → ".join(wr["known_cycles"]) if wr["known_cycles"] else "first recorded"
-            print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p)}  (crashed {drop:.0f}% from pump peak)")
-            print(f"     Entry: {_pfmt(p)} | SL: {_pfmt(sl)} (-25%) | TP: {_pfmt(tp)} (+100%)")
-            print(f"     Max hold: 48h | Max position: €{WHALE_RIDE_MAX_EUR:.0f}")
-            print(f"     Pattern: {cycles_str}")
-            print(f"     Reason: {wr['crash_reason']}")
+            if tier == "risky":
+                sl_pct = "-10%"
+                tp_pct = "+50%"
+                max_eur = wr.get("max_eur", WHALE_RIDE_MAX_EUR / 2)
+                hold_h  = wr.get("max_hold_hours", 24)
+                print(f"\n  ⚡ RISKY WHALE RIDE: {sym} {_pfmt(p * _eur)}  (partial crash {abs(drop):.0f}% from peak)")
+                print(f"     Entry: {_pfmt(p * _eur)} | SL: {_pfmt(sl * _eur)} ({sl_pct}) | TP: {_pfmt(tp * _eur)} ({tp_pct})")
+                print(f"     Max hold: {hold_h}h | Max position: €{max_eur:.0f} (HALF SIZE — high risk)")
+                print(f"     Pattern: {cycles_str}")
+                print(f"     Reason: {wr['crash_reason']}")
+            else:
+                print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p * _eur)}  (crashed {abs(drop):.0f}% from pump peak)")
+                print(f"     Entry: {_pfmt(p * _eur)} | SL: {_pfmt(sl * _eur)} (-15% pre-milestone) | TP: {_pfmt(tp * _eur)} (+100%)")
+                print(f"     Max hold: 48h | Max position: €{WHALE_RIDE_MAX_EUR:.0f}")
+                print(f"     Pattern: {cycles_str}")
+                print(f"     Reason: {wr['crash_reason']}")
 
     all_rug_display = rug_pull_coins
     if all_rug_display:
         print(f"\n  ⛔  RUG PULL DETECTED  (excluded)\n" + "-" * 60)
         for sym, price, reason in all_rug_display:
-            print(f"  ✗  {sym:10s}  {_pfmt(price)}  —  {reason}")
+            print(f"  ✗  {sym:10s}  {_pfmt(price * _eur)}  —  {reason}")
 
     if wash_trading:
         print(f"\n  ⚠️  WASH TRADING SUSPECTED  (excluded)\n" + "-" * 60)
@@ -1850,11 +2211,11 @@ def run_smart_scanner(
 
             ch24_wr = wr.get("change_24h", 0)
             ch7d_wr = wr.get("change_7d", 0)
-            print(f"\n  🐋 {sym} {_pfmt(price)} — WHALE RIDE{scam_tag}")
+            print(f"\n  🐋 {sym} {_pfmt(price * _eur)} — WHALE RIDE{scam_tag}")
             print(f"     24h: {ch24_wr:+.1f}%  |  7d: {ch7d_wr:+.1f}%")
             print(f"     Crash: {crash}")
             print(f"     Pattern: {cycles_str}")
-            print(f"     Entry: {_pfmt(price)} | SL: {_pfmt(sl)} (-15%) | TP: {_pfmt(tp)} (+50%)")
+            print(f"     Entry: {_pfmt(price * _eur)} | SL: {_pfmt(sl * _eur)} (-15%) | TP: {_pfmt(tp * _eur)} (+50%)")
             print(f"     Max hold: {hold}h | Cycle #{cyc_num}{ally_str}")
             print(f"     ⚠️ EXTREME RISK — manipulated token, max 5% of portfolio")
 
@@ -1880,4 +2241,66 @@ def run_smart_scanner(
     except Exception as _wr_e:
         print(f"  ⚠️  Whale rider module error: {_wr_e}")
 
+    # ── Telegram summary: top 10 buys + top 10 whale ride suspects ────────
+    try:
+        _send_telegram_top10(top10, all_whale_rides, fear_greed)
+    except Exception as _tg_e:
+        print(f"  ⚠️  Telegram top-10 summary failed: {_tg_e}")
+
     return top10, pump_coins, all_whale_rides, quality_count, _catalysts
+
+
+def _send_telegram_top10(
+    top10: list[dict],
+    whale_rides: list[dict],
+    fear_greed: dict,
+) -> None:
+    """Send top-10 scanner picks and top-10 whale ride suspects to Telegram."""
+    from src.utils.telegram import send_telegram
+
+    try:
+        from src.connectors.coingecko import get_eur_usd_rate as _get_eur_rate
+        _eur = _get_eur_rate()
+    except Exception:
+        _eur = 0.92
+
+    def _pfmt(p: float) -> str:
+        if p == 0:    return "€0"
+        if p >= 1:    return f"€{p:,.2f}"
+        if p >= 0.01: return f"€{p:.4f}"
+        return f"€{p:.8f}"
+
+    fg_val   = (fear_greed or {}).get("value", 50)
+    fg_label = (fear_greed or {}).get("label", "?")
+    lines_scanner = [f"<b>🔍 TOP 10 SCANNER PICKS — F&amp;G {fg_val}/100 ({fg_label})</b>\n"]
+    for i, r in enumerate(top10[:10], 1):
+        sym   = r.get("symbol", "?")
+        score = r.get("score", 0)
+        ch24  = r.get("change_24h", 0)
+        rsi   = r.get("rsi")
+        macd  = r.get("macd", "?")
+        price = r.get("price", 0) * _eur
+        rsi_s = f" RSI {rsi:.0f}" if rsi is not None else ""
+        lines_scanner.append(
+            f"  {i}. <b>{sym}</b> {_pfmt(price)}  score={score}  24h={ch24:+.1f}%{rsi_s}  MACD={macd}"
+        )
+
+    lines_whale = ["\n<b>🐋 TOP WHALE RIDE SUSPECTS</b>\n"]
+    wr_shown = whale_rides[:10]
+    if wr_shown:
+        for wr in wr_shown:
+            sym   = wr.get("symbol", "?")
+            tier  = wr.get("ride_tier", "standard")
+            tp    = wr.get("take_profit", 0) * _eur
+            sl    = wr.get("stop_loss", 0) * _eur
+            crash = wr.get("crash_reason", "?")[:60]
+            tier_tag = " ⚡ RISKY" if tier == "risky" else ""
+            lines_whale.append(
+                f"  🐋 <b>{sym}</b>{tier_tag}  TP {_pfmt(tp)} / SL {_pfmt(sl)}\n"
+                f"     {crash}"
+            )
+    else:
+        lines_whale.append("  No whale ride suspects this scan.")
+
+    msg = "\n".join(lines_scanner) + "\n".join(lines_whale)
+    send_telegram(msg)
