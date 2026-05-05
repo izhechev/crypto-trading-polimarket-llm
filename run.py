@@ -1192,31 +1192,31 @@ def main():
         from src.utils.telegram_bot import start_bot_thread
         start_bot_thread()
 
-        # Start price alert monitor — checks every 15min for milestone/proximity alerts
+        # Start price alert monitor — checks every 1h for milestone/proximity alerts
         import threading
         from src.utils.price_alerts import run_alert_loop
-        alert_thread = threading.Thread(target=run_alert_loop, args=(15,), daemon=True, name="price-alerts")
+        alert_thread = threading.Thread(target=run_alert_loop, args=(60,), daemon=True, name="price-alerts")
         alert_thread.start()
-        print("  Price alert monitor started (every 15 min)")
+        print("  Price alert monitor started (every 1h)")
 
-        # Run immediately, then every hour (full scan) + every 15 min (whale check)
+        # Run immediately, then every 3h (full scan) + every 24h (whale check)
         run_scan_cycle(exchange=args.exchange, debate=args.debate)
 
         scheduler = BlockingScheduler(timezone="UTC")
         scheduler.add_job(
             run_scan_cycle,
             trigger="interval",
-            hours=1,
+            hours=3,
             kwargs={"exchange": args.exchange, "debate": args.debate},
             id="scan_cycle",
         )
         scheduler.add_job(
             run_whale_check,
             trigger="interval",
-            minutes=15,
+            hours=24,
             id="whale_check",
         )
-        print(f"\n  Scheduler running — full scan every 1h, whale check every 15min. Ctrl+C to stop.\n")
+        print(f"\n  Scheduler running — full scan every 3h, whale check every 24h. Ctrl+C to stop.\n")
         try:
             scheduler.start()
         except KeyboardInterrupt:
@@ -1234,11 +1234,11 @@ def main():
 
         import threading
         from src.utils.price_alerts import run_alert_loop
-        alert_thread = threading.Thread(target=run_alert_loop, args=(15,), daemon=True, name="price-alerts")
+        alert_thread = threading.Thread(target=run_alert_loop, args=(60,), daemon=True, name="price-alerts")
         alert_thread.start()
-        print("  Price alert monitor started (every 15 min)")
+        print("  Price alert monitor started (every 1h)")
 
-        # Run immediately, then every hour (full scan) + every 15 min (whale check)
+        # Run immediately, then every 3h (full scan) + every 24h (whale check)
         run_scan_cycle(exchange=args.exchange, debate=args.debate,
                        run_stocks=False, run_polymarket=False)
 
@@ -1246,7 +1246,7 @@ def main():
         scheduler.add_job(
             run_scan_cycle,
             trigger="interval",
-            hours=1,
+            hours=3,
             kwargs={"exchange": args.exchange, "debate": args.debate,
                     "run_stocks": False, "run_polymarket": False},
             id="crypto_cycle",
@@ -1254,10 +1254,10 @@ def main():
         scheduler.add_job(
             run_whale_check,
             trigger="interval",
-            minutes=15,
+            hours=24,
             id="whale_check",
         )
-        print(f"\n  Crypto scheduler running — full scan every 1h, whale check every 15min. Ctrl+C to stop.\n")
+        print(f"\n  Crypto scheduler running — full scan every 3h, whale check every 24h. Ctrl+C to stop.\n")
         try:
             scheduler.start()
         except KeyboardInterrupt:

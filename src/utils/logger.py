@@ -16,6 +16,14 @@ DUST_THRESHOLD_USD = 0.12   # holdings below this are labelled "dust"
 import re as _re
 
 
+def _pfmt(p: float) -> str:
+    """Format a price with enough decimal places to show significance."""
+    if p >= 1:       return f"${p:,.4f}"
+    if p >= 0.01:    return f"${p:.5f}"
+    if p >= 0.0001:  return f"${p:.7f}"
+    return f"${p:.10f}"
+
+
 # ── WIN analysis helpers ──────────────────────────────────────────────────
 
 def _parse_entry_signals(reasoning: str) -> dict:
@@ -125,7 +133,7 @@ def print_win_analysis(row: dict) -> None:
     if sigs["coiled_spring"]:
         print(f"     - Coiled spring: deep ATH discount + exhausted sellers")
 
-    print(f"     - Entered ${entry:.4f} → exited ${exit_p:.4f}")
+    print(f"     - Entered {_pfmt(entry)} → exited {_pfmt(exit_p)}")
 
     # Build 1-line lesson from dominant signals
     lessons: list[str] = []
@@ -1083,42 +1091,49 @@ def update_open_positions() -> None:
     except Exception as _e1:
         print(f"  [tracking] CG price fetch failed: {_e1}")
 
-    # Tier 2: Binance public ticker — free, no key, covers most coins by {SYM}USDT pair.
-    _missing = [cid for cid in coin_ids if cid not in usd_map]
-    if _missing:
-        try:
-            _bn_resp = _httpx.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                timeout=15,
-            )
-            if _bn_resp.status_code == 200:
-                _bn_sym: dict[str, float] = {}
-                for _tk in _bn_resp.json():
-                    _s = _tk.get("symbol", "")
-                    if _s.endswith("USDT"):
-                        _base = _s[:-4]
-                        try:
-                            _bn_sym[_base] = float(_tk["price"])
-                        except (ValueError, TypeError):
-                            pass
-                _bn_found: list[str] = []
-                for _row in scanner_open:
-                    _cid = _row.get("coin_id", "")
-                    if _cid in usd_map:
-                        continue
-                    _sym = _row.get("coin", "").upper()
-                    _p   = _bn_sym.get(_sym)
-                    if _p and _p > 0:
-                        usd_map[_cid] = _p
-                        eur_map[_cid] = _p * _EUR
-                        _bn_found.append(_cid)
-                if _bn_found:
-                    _syms_bn = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _bn_found]
-                    print(f"  Binance resolved: {', '.join(_syms_bn)}")
-            else:
-                print(f"  [tracking] Binance HTTP {_bn_resp.status_code}")
-        except Exception as _e2:
-            print(f"  [tracking] Binance fetch failed: {_e2}")
+    # Tier 2: Binance public ticker — always fetched for cross-validation + fallback.
+    # If CG and Binance disagree by >10%, Binance wins (more real-time).
+    try:
+        _bn_resp = _httpx.get(
+            "https://api.binance.com/api/v3/ticker/price",
+            timeout=15,
+        )
+        if _bn_resp.status_code == 200:
+            _bn_sym: dict[str, float] = {}
+            for _tk in _bn_resp.json():
+                _s = _tk.get("symbol", "")
+                if _s.endswith("USDT"):
+                    _base = _s[:-4]
+                    try:
+                        _bn_sym[_base] = float(_tk["price"])
+                    except (ValueError, TypeError):
+                        pass
+            _bn_found: list[str] = []
+            for _row in scanner_open:
+                _cid = _row.get("coin_id", "")
+                _sym = _row.get("coin", "").upper()
+                _bn_p = _bn_sym.get(_sym)
+                if not _bn_p or _bn_p <= 0:
+                    continue
+                if _cid in usd_map:
+                    # Cross-validate: flag + override if >10% divergence
+                    _cg_p = usd_map[_cid]
+                    _diff = abs(_bn_p - _cg_p) / _cg_p if _cg_p else 0
+                    if _diff > 0.10:
+                        print(f"  ⚠️  {_sym} price mismatch: CG={_pfmt(_cg_p)} vs Binance={_pfmt(_bn_p)} ({_diff*100:.1f}%) — using Binance")
+                        usd_map[_cid] = _bn_p
+                        eur_map[_cid] = _bn_p * _EUR
+                else:
+                    usd_map[_cid] = _bn_p
+                    eur_map[_cid] = _bn_p * _EUR
+                    _bn_found.append(_cid)
+            if _bn_found:
+                _syms_bn = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _bn_found]
+                print(f"  Binance resolved: {', '.join(_syms_bn)}")
+        else:
+            print(f"  [tracking] Binance HTTP {_bn_resp.status_code}")
+    except Exception as _e2:
+        print(f"  [tracking] Binance fetch failed: {_e2}")
 
     # Tier 3: KuCoin all-tickers — covers long-tail and meme coins not on Binance.
     _missing = [cid for cid in coin_ids if cid not in usd_map]
@@ -2200,7 +2215,7 @@ def print_track_record() -> None:
                         reopen_tag = "  (re-open)"
                 print(
                     f"    [{icon}] {coin:8s}  {pnl:+.1f}%"
-                    f"  entry ${entry:.4f} -> exit ${exit_p:.4f}  ({date}){reopen_tag}"
+                    f"  entry {_pfmt(entry)} -> exit {_pfmt(exit_p)}  ({date}){reopen_tag}"
                 )
             except (ValueError, KeyError):
                 pass
