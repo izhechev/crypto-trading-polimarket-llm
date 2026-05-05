@@ -837,11 +837,11 @@ def log_whale_rider_alert(c: dict, fear_greed_value: int, open_position: bool = 
     # SL/TP: tighter in extreme fear, wider in normal market
     if open_position:
         tp_mult = 1.20 if fear_greed_value < 30 else 1.25
-        sl_mult = 0.88  # -12% stop
+        sl_mult = 0.90  # -10% stop
         sl      = round(price * sl_mult, 8)
         tp      = round(price * tp_mult, 8)
         tp_pct  = int((tp_mult - 1) * 100)
-        mode    = f"SL=-12% TP=+{tp_pct}%"
+        mode    = f"SL=-10% TP=+{tp_pct}%"
     else:
         sl, tp  = 0, 0
         mode    = "tracking only"
@@ -1066,7 +1066,7 @@ def update_open_positions() -> None:
     # Avoids the 4-retry blocking of /coins/markets when CG is rate-limited.
     try:
         _cg_resp = _httpx.get(
-            "https://api.coingecko.com/api/v3/simple/price",
+            "https://pro-api.coingecko.com/api/v3/simple/price",
             params={"ids": ",".join(_cg_ids_to_fetch), "vs_currencies": "usd"},
             headers=_cg_headers(),
             timeout=15,
@@ -1249,9 +1249,10 @@ def update_open_positions() -> None:
     new_wins: list[dict] = []
     for row in rows:
         row_type = row.get("type", "SCANNER")
-        if (row.get("status") != "OPEN"
-                or not row.get("coin_id")
-                or row_type not in ("SCANNER", "", "WHALE_RIDE")):
+        if row.get("status") != "OPEN" or row_type not in ("SCANNER", "", "WHALE_RIDE"):
+            continue
+        # WHALE_RIDE positions without coin_id still need time-expiry check
+        if not row.get("coin_id") and row_type != "WHALE_RIDE":
             continue
         usd = usd_map.get(row["coin_id"])
         if usd is None:
@@ -1381,7 +1382,7 @@ def update_open_positions() -> None:
             # Pre-milestone hard SL: -15% for standard, -10% for risky tier
             _is_principal_recovered = "PRINCIPAL_RECOVERED" in reasoning
             _is_risky_tier = "[RISKY_TIER" in reasoning
-            _pre_sl_threshold = -10.0 if _is_risky_tier else -15.0
+            _pre_sl_threshold = -10.0
             if not _is_principal_recovered and pnl_pct <= _pre_sl_threshold:
                 row["status"]     = "LOSS"
                 row["exit_price"] = round(usd, 6)
@@ -1444,6 +1445,15 @@ def update_open_positions() -> None:
             continue
 
         _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        # Hard -10% SL floor — close any scanner position bleeding past -10%
+        if pnl_pct <= -10.0:
+            row["status"]     = "LOSS"
+            row["exit_price"] = round(usd, 6)
+            row["close_date"] = _now_str
+            closed += 1
+            print(f"  🛑 HARD -10% SL: {row['coin']} {pnl_pct:+.1f}% → LOSS")
+            continue
 
         # TIME-BASED FORCE CLOSE (v2.0 — tighter rules, cut losers faster)
         # Tier 0: age >= 3d AND pnl <= -8%  → early loss cut, stop bleeding

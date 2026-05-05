@@ -141,7 +141,7 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
     # Tier 1: CoinGecko /simple/price
     try:
         resp = _httpx.get(
-            "https://api.coingecko.com/api/v3/simple/price",
+            "https://pro-api.coingecko.com/api/v3/simple/price",
             params={"ids": ",".join(_cg_to_cids.keys()), "vs_currencies": "usd"},
             headers=_cg_headers(),
             timeout=15,
