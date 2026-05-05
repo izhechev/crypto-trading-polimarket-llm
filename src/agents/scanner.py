@@ -1583,10 +1583,12 @@ def run_smart_scanner(
         if _rec_path.exists():
             with open(_rec_path, newline="", encoding="utf-8") as _rf:
                 _all_open_rows = list(_csv_mod.DictReader(_rf))
+            _now_utc = _dt.now(_tz.utc)
             _open_rec_syms = {
                 r.get("coin", "").upper()
                 for r in _all_open_rows
                 if r.get("status") == "OPEN"
+                and (_now_utc - _parse_rec_date(r.get("date", ""))).total_seconds() / 3600 < 24
             }
             # Track SCANNER-only open positions — used to block whale_rides category mixing
             _open_scanner_syms = {
@@ -1594,6 +1596,7 @@ def run_smart_scanner(
                 for r in _all_open_rows
                 if r.get("status") == "OPEN"
                 and r.get("type", "SCANNER") in ("SCANNER", "")
+                and (_now_utc - _parse_rec_date(r.get("date", ""))).total_seconds() / 3600 < 24
             }
             # Track recently logged whale rides (OPEN or EXCLUDED within 7d) — skip re-display
             _recent_whale_syms = {
