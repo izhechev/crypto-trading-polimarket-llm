@@ -1,5 +1,5 @@
 """
-Price alert monitor — runs every 1 hour, no Groq needed.
+Price alert monitor — runs every 15 minutes, no Groq needed.
 
 Whale ride milestones (checked every run):
   +25%   → alert: first milestone hit
