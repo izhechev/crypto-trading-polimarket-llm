@@ -1296,15 +1296,24 @@ def update_open_positions() -> None:
                 row["close_date"] = _now_str
                 closed += 1
                 print(f"  WHALE_RIDE {row['coin']} worthless → LOSS {pnl_pct:+.1f}%")
-            elif _wr_expired or _hrs_open >= 24.0:
-                # Hard 24h max hold — close all whale rides unconditionally at 24h
+            elif _wr_expired:
                 _expire_status = "WIN" if pnl_pct > 0 else "LOSS"
                 row["status"]     = _expire_status
                 row["exit_price"] = round(usd, 6)
                 row["close_date"] = _now_str
                 closed += 1
-                print(f"  ⏰ WHALE_RIDE 24h: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_expire_status}")
+                print(f"  ⏰ WHALE_RIDE EXPIRED: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_expire_status}")
                 if _expire_status == "WIN":
+                    new_wins.append(row)
+            elif _hrs_open >= 24.0 and "[MILESTONE_15]" not in reasoning:
+                # Dead momentum: didn't hit +15% within 24h → no point holding
+                _dm_status = "WIN" if pnl_pct > 0 else "LOSS"
+                row["status"]     = _dm_status
+                row["exit_price"] = round(usd, 6)
+                row["close_date"] = _now_str
+                closed += 1
+                print(f"  ⏰ WHALE_RIDE DEAD MOMENTUM: {row['coin']} {pnl_pct:+.1f}% (no +15% in 24h) → {_dm_status}")
+                if _dm_status == "WIN":
                     new_wins.append(row)
             continue
 
