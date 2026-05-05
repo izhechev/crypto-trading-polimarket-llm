@@ -1296,34 +1296,15 @@ def update_open_positions() -> None:
                 row["close_date"] = _now_str
                 closed += 1
                 print(f"  WHALE_RIDE {row['coin']} worthless → LOSS {pnl_pct:+.1f}%")
-            elif _wr_expired:
-                # Bug 6: time limit expired → close WIN if profitable, LOSS otherwise
+            elif _wr_expired or _hrs_open >= 24.0:
+                # Hard 24h max hold — close all whale rides unconditionally at 24h
                 _expire_status = "WIN" if pnl_pct > 0 else "LOSS"
                 row["status"]     = _expire_status
                 row["exit_price"] = round(usd, 6)
                 row["close_date"] = _now_str
                 closed += 1
-                print(f"  ⏰ WHALE_RIDE EXPIRED: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_expire_status}")
+                print(f"  ⏰ WHALE_RIDE 24h: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_expire_status}")
                 if _expire_status == "WIN":
-                    new_wins.append(row)
-            elif _hrs_open >= 24.0 and "[MILESTONE_15]" not in reasoning:
-                # 24h dead momentum: didn't hit +15% within 24h → exit regardless of P&L
-                row["status"]     = "WIN" if pnl_pct > 0 else "LOSS"
-                row["exit_price"] = round(usd, 6)
-                row["close_date"] = _now_str
-                closed += 1
-                print(f"  ⏰ WHALE_RIDE 24h DEAD MOMENTUM: {row['coin']} {pnl_pct:+.1f}% (never hit +15%) → {row['status']}")
-                if row["status"] == "WIN":
-                    new_wins.append(row)
-            elif _hrs_open >= 72 and pnl_pct < 10.0:
-                # Stale position: open >=72h with less than +10% gain — no longer worth holding
-                _stale_status = "WIN" if pnl_pct > 0 else "LOSS"
-                row["status"]     = _stale_status
-                row["exit_price"] = round(usd, 6)
-                row["close_date"] = _now_str
-                closed += 1
-                print(f"  ⏰ WHALE_RIDE STALE: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_stale_status}")
-                if _stale_status == "WIN":
                     new_wins.append(row)
             continue
 
@@ -1338,24 +1319,17 @@ def update_open_positions() -> None:
             print(f"  🛑 HARD -10% SL: {row['coin']} {pnl_pct:+.1f}% → LOSS")
             continue
 
-        # TIME-BASED FORCE CLOSE (v2.0 — tighter rules, cut losers faster)
-        # Tier 0: age >= 3d AND pnl <= -8%  → early loss cut, stop bleeding
-        # Tier 1: age >= 5d AND pnl <  +3%  → going nowhere, free the slot
-        # Tier 2: age >  8d AND pnl <  +7%  → keep only strong winners past 8d
+        # Hard 24h max hold — close all scanner positions unconditionally after 24h
         try:
             entry_dt  = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-            days_open = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 86400
-            _tier0 = days_open >= 3  and pnl_pct <= -8.0
-            _tier1 = days_open >= 5  and pnl_pct <   3.0
-            _tier2 = days_open >  8  and pnl_pct <   7.0
-            if _tier0 or _tier1 or _tier2:
-                _te_status = "LOSS" if pnl_pct < 0 else "TIME EXIT"
+            hours_open = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
+            if hours_open >= 24.0:
+                _te_status = "WIN" if pnl_pct > 0 else "LOSS"
                 row["status"]     = _te_status
                 row["exit_price"] = round(usd, 6)
                 row["close_date"] = _now_str
                 closed += 1
-                _reason = "≥3d <=-8% (early cut)" if _tier0 else ("≥5d <+3%" if _tier1 else ">8d <+7%")
-                print(f"  [TIME EXIT] {row['coin']} {pnl_pct:+.1f}% ({days_open:.0f}d) — {_reason}")
+                print(f"  ⏰ SCANNER 24h: {row['coin']} {pnl_pct:+.1f}% after {hours_open:.0f}h → {_te_status}")
                 continue
         except Exception:
             pass
