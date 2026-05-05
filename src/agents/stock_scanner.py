@@ -651,7 +651,7 @@ def analyze_stocks_with_groq(top10: list[dict]) -> list[dict]:
     else:
         label = f"TOP {n} STOCK BUY{'S' if n != 1 else ''}"
         print("\n" + "=" * 60)
-        print(f"  {label}  (each €100 allocation)")
+        print(f"  {label}  (each $100 allocation)")
         print("=" * 60)
         for i, p in enumerate(top_buys, 1):
             sym  = p.get("stock", "?")

@@ -265,7 +265,12 @@ def run_debate(
 
     if v == "BUY":
         def _fmt(val):
-            return f"${val:,.4f}" if isinstance(val, (int, float)) and val else "N/A"
+            if not (isinstance(val, (int, float)) and val):
+                return "N/A"
+            ev = val
+            if ev >= 1:   return f"${ev:,.4f}"
+            if ev >= 0.01: return f"${ev:.6f}"
+            return f"${ev:.8f}"
 
         print(f"  Entry:        {_fmt(verdict.get('entry_price'))}")
         print(f"  Stop Loss:    {_fmt(verdict.get('stop_loss'))}")

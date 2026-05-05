@@ -11,7 +11,7 @@ import config
 
 LOG_PATH          = config.DATA_DIR / "recommendations.csv"
 HISTORY_PATH      = config.DATA_DIR / "price_history.csv"
-DUST_THRESHOLD_EUR = 0.10   # holdings below this are labelled "dust"
+DUST_THRESHOLD_USD = 0.12   # holdings below this are labelled "dust"
 
 import re as _re
 
@@ -390,6 +390,7 @@ def print_lose_patterns() -> None:
 
 _HEADERS = [
     "date", "type", "coin", "coin_id",
+    "position_id",    # unique per DCA entry, e.g. BTC_20250505_143022
     "entry_price",    # USD
     "stop_loss",      # USD
     "take_profit",    # USD
@@ -398,7 +399,7 @@ _HEADERS = [
     "close_date",     # UTC timestamp when WIN/LOSS/EXCLUDED was set
     "pnl_pct",        # % — currency-neutral
     "current_price",  # USD
-    "price_eur",      # EUR
+    "price_eur",      # EUR (kept for reference; all display uses USD)
     "timeframe", "fear_greed", "reasoning",
     "groq_rank",      # 1/2/3 — Groq's ranking among top picks (empty if not a Groq pick)
     "qualifier",      # INSTANT_QUALIFIER | NEWS_BOOST | OVERSOLD_VOL | BASE_SCORE
@@ -461,47 +462,49 @@ def _latest_per_coin(rows: list[dict]) -> dict[str, dict]:
 
 
 def _fmt(eur: float, usd: float) -> str:
-    """Format as '€X.XXXX' choosing decimal places by magnitude."""
-    decimals = 2 if eur >= 1 else 4 if eur >= 0.01 else 6 if eur >= 0.0001 else 8
-    return f"€{eur:.{decimals}f}"
+    """Format as '$X.XXXX' choosing decimal places by magnitude."""
+    val = usd
+    decimals = 2 if val >= 1 else 4 if val >= 0.01 else 6 if val >= 0.0001 else 8
+    return f"${val:.{decimals}f}"
 
 
 def _usd_to_eur(usd: float) -> str:
-    """Convert a stored USD price to EUR for display."""
-    try:
-        from src.connectors.coingecko import get_eur_usd_rate
-        rate = get_eur_usd_rate()
-    except Exception:
-        rate = 0.88
-    eur = usd * rate
-    decimals = 2 if eur >= 1 else 4 if eur >= 0.01 else 6 if eur >= 0.0001 else 8
-    return f"€{eur:.{decimals}f}"
+    """Convert a stored USD price to a formatted string (now USD default)."""
+    val = usd
+    decimals = 2 if val >= 1 else 4 if val >= 0.01 else 6 if val >= 0.0001 else 8
+    return f"${val:.{decimals}f}"
 
 
 # ── Public API ────────────────────────────────────────────────────────────
 
-_MAX_OPEN_SCANNER = 15   # v2.0: hard cap — never open more than 15 concurrent scanner positions
+_MAX_OPEN_SCANNER  = 50   # Hard cap — never open more than 50 concurrent scanner positions
+_MAX_DCA_PER_COIN  =  5   # Max concurrent DCA positions for the same coin
+
+
+def _make_position_id(coin: str) -> str:
+    return f"{coin}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
 
 def log_recommendation(rec: dict, fear_greed_value: int) -> None:
     """
     Append a new scanner recommendation with status=OPEN and type=SCANNER.
-    Skips if the same coin already has an OPEN scanner position.
-    If the coin previously closed as WIN/LOSS, re-opens a new position and notes it.
+    Supports DCA — allows up to _MAX_DCA_PER_COIN concurrent open positions per coin.
+    If the coin previously closed as WIN/LOSS, re-opens and notes it.
     """
     rows = _read()
     coin = rec.get("coin", "").upper()
 
-    # Duplicate check — avoid logging the same pick while it's still open.
-    already_open = any(
-        r.get("type", "") in ("SCANNER", "")
+    # DCA check — allow multiple positions per coin up to the cap
+    open_for_coin = [
+        r for r in rows
+        if r.get("type", "") in ("SCANNER", "")
         and r.get("status") == "OPEN"
         and r.get("coin", "").upper() == coin
-        for r in rows
-    )
-    if already_open:
-        print(f"  Skipped — {coin} already has an OPEN scanner position")
+    ]
+    if len(open_for_coin) >= _MAX_DCA_PER_COIN:
+        print(f"  Skipped — {coin} already has {len(open_for_coin)} open DCA positions (max {_MAX_DCA_PER_COIN})")
         return
+    is_dca = len(open_for_coin) > 0
 
     # Max concurrent positions cap — quality over quantity
     open_count = sum(
@@ -526,64 +529,66 @@ def log_recommendation(rec: dict, fear_greed_value: int) -> None:
             )
             print(f"  Closed WHALE_RIDE for {coin} — superseded by scanner pick (category fix)")
 
-    # Find most-recent closed trade for this coin to add re-entry note
+    # Cooldowns only apply when there are NO existing open positions for this coin.
+    # If we already hold the coin (DCA add), skip cooldowns — we're already exposed.
     prev_note = ""
-    closed_trades = [
-        r for r in rows
-        if r.get("coin", "").upper() == coin
-        and r.get("type", "") in ("SCANNER", "")
-        and r.get("status") in ("WIN", "LOSS", "TIME EXIT", "EXCLUDED")
-    ]
-    if closed_trades:
-        last = max(closed_trades, key=lambda r: r.get("date", ""))
-        prev_status = last.get("status", "")
+    if not is_dca:
+        closed_trades = [
+            r for r in rows
+            if r.get("coin", "").upper() == coin
+            and r.get("type", "") in ("SCANNER", "")
+            and r.get("status") in ("WIN", "LOSS", "TIME EXIT", "EXCLUDED")
+        ]
+        if closed_trades:
+            last = max(closed_trades, key=lambda r: r.get("date", ""))
+            prev_status = last.get("status", "")
 
-        # 48h cooldown after LOSS — let the coin stabilize before re-entering
-        if prev_status == "LOSS":
-            try:
-                last_dt = datetime.strptime(last["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-                hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
-                if hours_since < 48:
-                    print(f"  Cooldown — {coin} closed as LOSS {hours_since:.0f}h ago, skipping for 48h")
-                    return
-            except Exception:
-                pass
-
-        # 7-day cooldown after EXCLUDED — fundamental crisis (web validation reject),
-        # not just a price dip. Give the situation time to resolve.
-        # Exception: if the CURRENT scan's web validation returned CONFIRM, the
-        # issue has resolved → lift the exclusion and allow re-entry.
-        if prev_status == "EXCLUDED":
-            try:
-                last_dt = datetime.strptime(last["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-                hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
-                if hours_since < 168:  # 7 days
-                    if rec.get("web_research_verdict") == "CONFIRM":
-                        # Web validation re-confirmed → clear the exclusion flag so
-                        # _build_excluded_cooldown_set won't suppress it from display either.
-                        last["status"] = "EXCLUDED_CLEARED"
-                        _write(rows)
-                        print(f"  ✅ {coin} exclusion lifted — web validation CONFIRM overrides {hours_since:.0f}h cooldown")
-                    else:
-                        days_left = (168 - hours_since) / 24
-                        print(f"  Cooldown — {coin} EXCLUDED {hours_since:.0f}h ago (fundamental issue), {days_left:.1f}d remaining")
+            # 48h cooldown after LOSS — let the coin stabilize before re-entering
+            if prev_status == "LOSS":
+                try:
+                    last_dt = datetime.strptime(last["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                    hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                    if hours_since < 48:
+                        print(f"  Cooldown — {coin} closed as LOSS {hours_since:.0f}h ago, skipping for 48h")
                         return
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
-        try:
-            prev_pnl = float(last.get("pnl_pct", 0))
-            prev_note = f" | new position (prev: {prev_status} {prev_pnl:+.1f}%)"
-        except (ValueError, TypeError):
-            prev_note = f" | new position (prev: {prev_status})"
-        print(f"  Re-opening {coin} — {prev_note.strip(' | ')}")
+            if prev_status == "EXCLUDED":
+                try:
+                    last_dt = datetime.strptime(last["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                    hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                    if hours_since < 168:  # 7 days
+                        if rec.get("web_research_verdict") == "CONFIRM":
+                            last["status"] = "EXCLUDED_CLEARED"
+                            _write(rows)
+                            print(f"  ✅ {coin} exclusion lifted — web validation CONFIRM overrides {hours_since:.0f}h cooldown")
+                        else:
+                            days_left = (168 - hours_since) / 24
+                            print(f"  Cooldown — {coin} EXCLUDED {hours_since:.0f}h ago (fundamental issue), {days_left:.1f}d remaining")
+                            return
+                except Exception:
+                    pass
 
+            try:
+                prev_pnl = float(last.get("pnl_pct", 0))
+                prev_note = f" | new position (prev: {prev_status} {prev_pnl:+.1f}%)"
+            except (ValueError, TypeError):
+                prev_note = f" | new position (prev: {prev_status})"
+            print(f"  Re-opening {coin} — {prev_note.strip(' | ')}")
+    else:
+        dca_note = f" | DCA #{len(open_for_coin)+1} @ ${rec.get('entry_price', '?')}"
+        prev_note = dca_note
+        print(f"  DCA add — {coin} position #{len(open_for_coin)+1}")
+
+    pid = _make_position_id(coin)
     base_reasoning = rec.get("reasoning", "").replace("\n", " ")
     rows.append({
         "date":          datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "type":          "SCANNER",
         "coin":          coin,
         "coin_id":       rec.get("coin_id", ""),
+        "position_id":   pid,
         "entry_price":   rec.get("entry_price", ""),
         "stop_loss":     rec.get("stop_loss", ""),
         "take_profit":   rec.get("take_profit", ""),
@@ -597,7 +602,7 @@ def log_recommendation(rec: dict, fear_greed_value: int) -> None:
         "reasoning":     base_reasoning + prev_note,
     })
     _write(rows)
-    print(f"  Logged → {LOG_PATH}")
+    print(f"  Logged {pid} → {LOG_PATH}")
 
 
 def _tp_sl_for_fg(entry: float, fear_greed_value: int) -> tuple[float, float]:
@@ -692,16 +697,34 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
             return datetime.min.replace(tzinfo=timezone.utc)
 
     # Bug 4: dedup by symbol OR coin_id (prevents same coin logged twice)
-    already_open = any(
-        r.get("type") == "WHALE_RIDE"
-        and r.get("status") in ("OPEN", "EXCLUDED")
-        and (r.get("coin", "").upper() == coin
-             or (cp_id and r.get("coin_id", "") == cp_id))
+    _recent_wr = [
+        r for r in rows
+        if r.get("type") == "WHALE_RIDE"
+        and (r.get("coin", "").upper() == coin or (cp_id and r.get("coin_id", "") == cp_id))
         and _row_date(r) >= _7d_ago
-        for r in rows
-    )
-    if already_open:
-        print(f"  Skipped WHALE_RIDE — {coin} already has an open or recently excluded whale ride (within 7d)")
+    ]
+    _can_reopen = True
+    for r in _recent_wr:
+        status = r.get("status")
+        if status == "OPEN":
+            # If already open but SL=0 (tracking only), allow upgrade to real SL/TP
+            if float(r.get("stop_loss") or 0) == 0:
+                r["status"] = "EXCLUDED_FOR_UPGRADE"
+                _can_reopen = True
+                continue
+            _can_reopen = False
+            break
+        if status == "EXCLUDED":
+            _can_reopen = False
+            break
+        # Only block if it was a LOSS (hit stop loss). 
+        # If it was TIME EXIT or WIN (even <15%), allow re-entry if it's still a top signal.
+        if status == "LOSS":
+            _can_reopen = False
+            break
+
+    if not _can_reopen:
+        print(f"  Skipped WHALE_RIDE — {coin} recently open, excluded, or hit LOSS (within 7d)")
         return
 
     # Never log as WHALE_RIDE if coin already has an OPEN SCANNER position
@@ -723,7 +746,7 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
     reasoning  = (
         f"Cycle #{wr.get('cycle_number',1)} | {cycles_str}"
         f" | crash: {wr.get('crash_reason','')}"
-        f" | max_hold: {wr.get('max_hold_hours',48)}h{scam_note}{tier_note}"
+        f" | max_hold: {wr.get('max_hold_hours',24)}h{scam_note}{tier_note}"
     )
 
     rows.append({
@@ -739,7 +762,7 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
         "pnl_pct":       "",
         "current_price": round(wr.get("entry", 0), 8),
         "price_eur":     "",
-        "timeframe":     f"{wr.get('max_hold_hours', 48)}h max",
+        "timeframe":     f"{wr.get('max_hold_hours', 24)}h max",
         "fear_greed":    fear_greed_value,
         "reasoning":     reasoning,
     })
@@ -747,12 +770,12 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
     print(f"  Whale ride logged → {coin} (cycle #{wr.get('cycle_number',1)})")
 
 
-def log_whale_rider_alert(c: dict, fear_greed_value: int) -> None:
+def log_whale_rider_alert(c: dict, fear_greed_value: int, open_position: bool = False) -> bool:
     """
-    Log a whale_rider module pump alert (EARLY/MID stage) to recommendations.csv.
-    Only called after a successful Telegram send.
-    SL/TP = 0 — manual trade, no automated stop/target.
-    Closed by close_whale_rider_position() when exit signal fires.
+    Log a whale_rider alert to recommendations.csv.
+    open_position=True → assign real SL/TP so update_open_positions() manages it.
+    open_position=False → SL=0/TP=0, tracked for exit signals only.
+    Returns True if a new row was written, False if skipped (dedup).
     """
     rows = _read()
     coin = c.get("symbol", "").upper()
@@ -767,14 +790,43 @@ def log_whale_rider_alert(c: dict, fear_greed_value: int) -> None:
         except Exception:
             return datetime.min.replace(tzinfo=timezone.utc)
 
-    if any(
-        r.get("type") == "WHALE_RIDE"
-        and r.get("status") in ("OPEN", "EXCLUDED")
+    _recent_wr = [
+        r for r in rows
+        if r.get("type") == "WHALE_RIDE"
         and r.get("coin", "").upper() == coin
         and _row_date_wr(r) >= _7d_ago
-        for r in rows
-    ):
-        return
+    ]
+    _can_reopen = True
+    _skip_reason = ""
+    for r in _recent_wr:
+        status = r.get("status")
+        if status == "OPEN":
+            # Upgrade logic: if currently OPEN but SL=0 (tracking only), and we now want to open with real SL/TP
+            try:
+                if open_position and float(r.get("stop_loss") or 0) == 0:
+                    r["status"] = "EXCLUDED_FOR_UPGRADE"
+                    _can_reopen = True
+                    continue
+            except Exception:
+                pass
+            _can_reopen = False
+            _skip_reason = "already OPEN"
+            break
+        if status == "EXCLUDED":
+            _can_reopen = False
+            _skip_reason = "recently EXCLUDED (fundamental issue)"
+            break
+        # Only block if it was a LOSS (hit stop loss).
+        # Profitable or time-expired closes within 7d are allowed to re-open.
+        if status == "LOSS":
+            _can_reopen = False
+            _skip_reason = "recently hit LOSS (7d cooldown)"
+            break
+
+    if not _can_reopen:
+        if _skip_reason != "already OPEN":
+            print(f"  Skipped WHALE_RIDER alert for {coin} — {_skip_reason}")
+        return False
 
     stage = c.get("stage", "?")
     ch7d  = c.get("change_7d", 0)
@@ -782,9 +834,21 @@ def log_whale_rider_alert(c: dict, fear_greed_value: int) -> None:
     vm    = c.get("vol_mcap", 0)
     price = c.get("price", 0)
 
+    # SL/TP: tighter in extreme fear, wider in normal market
+    if open_position:
+        tp_mult = 1.20 if fear_greed_value < 30 else 1.25
+        sl_mult = 0.88  # -12% stop
+        sl      = round(price * sl_mult, 8)
+        tp      = round(price * tp_mult, 8)
+        tp_pct  = int((tp_mult - 1) * 100)
+        mode    = f"SL=-12% TP=+{tp_pct}%"
+    else:
+        sl, tp  = 0, 0
+        mode    = "tracking only"
+
     reasoning = (
         f"[WHALE_RIDER] {stage} | 7d {ch7d:+.0f}% | 24h {ch24:+.1f}% | "
-        f"vol/mcap {vm:.2f}x | Manual trade only | max_hold: 720h"
+        f"vol/mcap {vm:.2f}x | {mode} | max_hold: 24h"
     )
 
     rows.append({
@@ -793,8 +857,8 @@ def log_whale_rider_alert(c: dict, fear_greed_value: int) -> None:
         "coin":          coin,
         "coin_id":       c.get("coin_id", ""),
         "entry_price":   round(price, 8),
-        "stop_loss":     0,                         # no SL — ride until +200% or expiry
-        "take_profit":   round(price * 3.00, 8),   # +200%
+        "stop_loss":     sl,
+        "take_profit":   tp,
         "status":        "OPEN",
         "exit_price":    "",
         "pnl_pct":       "",
@@ -805,7 +869,8 @@ def log_whale_rider_alert(c: dict, fear_greed_value: int) -> None:
         "reasoning":     reasoning,
     })
     _write(rows)
-    print(f"  Whale rider logged → {coin} [{stage}] SL=-10% TP=+200%")
+    print(f"  Whale rider logged → {coin} [{stage}] {mode}")
+    return True
 
 
 def close_whale_rider_position(sym: str, current_price: float, exit_reason: str = "") -> None:
@@ -910,6 +975,23 @@ def update_groq_rank(coin: str, groq_rank: int, qualifier: str, key_signal: str)
     coin_u = coin.upper()
     for row in rows:
         if (row.get("type", "") in ("SCANNER", "")
+                and row.get("status") == "OPEN"
+                and row.get("coin", "").upper() == coin_u):
+            row["groq_rank"]  = groq_rank
+            row["qualifier"]  = qualifier
+            row["key_signal"] = (key_signal or "")[:120]
+            _write(rows)
+            return
+
+
+def update_whale_rank(coin: str, groq_rank: int, qualifier: str, key_signal: str) -> None:
+    """
+    Stamp Groq's rank, qualifier, and key_signal onto an existing OPEN WHALE_RIDE row.
+    """
+    rows   = _read()
+    coin_u = coin.upper()
+    for row in rows:
+        if (row.get("type", "") == "WHALE_RIDE"
                 and row.get("status") == "OPEN"
                 and row.get("coin", "").upper() == coin_u):
             row["groq_rank"]  = groq_rank
@@ -1181,7 +1263,7 @@ def update_open_positions() -> None:
                     _entry_dt_te = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                     _hrs_te = (datetime.now(timezone.utc) - _entry_dt_te).total_seconds() / 3600
                     _m_te   = _re_te.search(r"max_hold:\s*(\d+)h", row.get("reasoning", ""))
-                    _mh_te  = int(_m_te.group(1)) if _m_te else 48
+                    _mh_te  = int(_m_te.group(1)) if _m_te else 24
                     if _hrs_te >= _mh_te:
                         _last_p  = float(row.get("current_price") or row.get("entry_price") or 0)
                         _ent_te  = float(row.get("entry_price") or 0)
@@ -1244,13 +1326,14 @@ def update_open_positions() -> None:
                 _entry_dt = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                 _hrs_open = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
                 _m = _re.search(r"max_hold:\s*(\d+)h", reasoning)
-                _max_hold = int(_m.group(1)) if _m else 48
+                _max_hold = int(_m.group(1)) if _m else 24
                 _wr_expired = _hrs_open >= _max_hold
             except Exception:
                 pass
 
             # Milestone logging — each level creates its own WIN record; position stays open
             _milestone_flags = {
+                15:  ("[MILESTONE_15]",  1),
                 25:  ("[MILESTONE_25]",  1),
                 50:  ("[MILESTONE_50]",  2),
                 100: ("[MILESTONE_100]", 3),
@@ -1339,8 +1422,17 @@ def update_open_positions() -> None:
                 print(f"  ⏰ WHALE_RIDE EXPIRED: {row['coin']} {pnl_pct:+.1f}% after {_hrs_open:.0f}h → {_expire_status}")
                 if _expire_status == "WIN":
                     new_wins.append(row)
-            elif _hrs_open > 72 and pnl_pct < 10.0:
-                # Stale position: open >72h with less than +10% gain — no longer worth holding
+            elif _hrs_open >= 24.0 and "[MILESTONE_15]" not in reasoning:
+                # 24h dead momentum: didn't hit +15% within 24h → exit regardless of P&L
+                row["status"]     = "WIN" if pnl_pct > 0 else "LOSS"
+                row["exit_price"] = round(usd, 6)
+                row["close_date"] = _now_str
+                closed += 1
+                print(f"  ⏰ WHALE_RIDE 24h DEAD MOMENTUM: {row['coin']} {pnl_pct:+.1f}% (never hit +15%) → {row['status']}")
+                if row["status"] == "WIN":
+                    new_wins.append(row)
+            elif _hrs_open >= 72 and pnl_pct < 10.0:
+                # Stale position: open >=72h with less than +10% gain — no longer worth holding
                 _stale_status = "WIN" if pnl_pct > 0 else "LOSS"
                 row["status"]     = _stale_status
                 row["exit_price"] = round(usd, 6)
@@ -1375,39 +1467,13 @@ def update_open_positions() -> None:
         except Exception:
             pass
 
-        # Trailing SL: raise stop floor as position becomes profitable.
-        # Prevents partial winners from being wiped back to entry losses.
-        # +10% → SL moves to breakeven | +15% → SL to +5% | +25% → SL to +10%
+        # Close at +10% — no trailing SL, lock profit immediately
         _reasoning = row.get("reasoning", "")
-        if pnl_pct >= 25 and "[TRAIL_10]" not in _reasoning and sl < round(entry * 1.10, 8):
-            sl = round(entry * 1.10, 8)
-            row["stop_loss"] = sl
-            row["reasoning"] = _reasoning + " [TRAIL_10]"
-            print(f"  📈 TRAIL SL: {row['coin']} at {pnl_pct:+.1f}% → SL locked at +10%")
-            try:
-                from src.utils.telegram import send_telegram as _tg
-                _tg(f"📈 <b>SL TRAILED — {row['coin']}</b>\n"
-                    f"  Position at {pnl_pct:+.1f}% → stop loss raised to <b>+10%</b>\n"
-                    f"  Your downside is now capped at +10% profit.")
-            except Exception:
-                pass
-        elif pnl_pct >= 15 and "[TRAIL_5]" not in _reasoning and "[TRAIL_10]" not in _reasoning and sl < round(entry * 1.05, 8):
-            sl = round(entry * 1.05, 8)
-            row["stop_loss"] = sl
-            row["reasoning"] = _reasoning + " [TRAIL_5]"
-            print(f"  📈 TRAIL SL: {row['coin']} at {pnl_pct:+.1f}% → SL locked at +5%")
-            try:
-                from src.utils.telegram import send_telegram as _tg
-                _tg(f"📈 <b>SL TRAILED — {row['coin']}</b>\n"
-                    f"  Position at {pnl_pct:+.1f}% → stop loss raised to <b>+5%</b>\n"
-                    f"  Worst case now: small profit.")
-            except Exception:
-                pass
-        elif pnl_pct >= 9.5 and "[TRAIL_5]" not in _reasoning and "[TRAIL_10]" not in _reasoning and "[BREAKEVEN_WIN]" not in _reasoning:
+        if pnl_pct >= 9.5 and "[WIN_10]" not in _reasoning:
             row["status"]     = "WIN"
             row["exit_price"] = round(usd, 6)
             row["close_date"] = _now_str
-            row["reasoning"]  = _reasoning + " [BREAKEVEN_WIN]"
+            row["reasoning"]  = _reasoning + " [WIN_10]"
             closed += 1
             new_wins.append(row)
             print(f"  ✅ +10% WIN CLOSE: {row['coin']} {pnl_pct:+.1f}% — locked as WIN")
@@ -1646,11 +1712,11 @@ def print_daily_activity() -> None:
     """
     Pure CSV calculation — no API calls, no Groq.
     Shows what happened today: opens, closes, P&L, best/worst open position.
-    Assumes €100 allocation per scanner position.
+    Assumes $100 allocation per scanner position.
     """
     rows = _read()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    ALLOC = 100.0  # € per position
+    ALLOC = 100.0  # $ per position
 
     # Opened today — SCANNER rows with date = today
     opened = [
@@ -1664,6 +1730,7 @@ def print_daily_activity() -> None:
     wins_today = [
         r for r in rows
         if r.get("status") == "WIN"
+        and r.get("type") != "WHALE_MILESTONE"   # milestones are checkpoints, not closed trades
         and r.get("close_date", "").startswith(today)
     ]
 
@@ -1701,11 +1768,11 @@ def print_daily_activity() -> None:
         if worst_pnl is None or pnl < worst_pnl:
             worst_pnl, worst = pnl, r["coin"]
 
-    # Today's net P&L in EUR from closed positions (EXPIRED counts toward net)
-    net_eur = 0.0
+    # Today's net P&L in USD from closed positions (EXPIRED counts toward net)
+    net_usd = 0.0
     for r in wins_today + losses_today + expired_today:
         try:
-            net_eur += ALLOC * float(r["pnl_pct"]) / 100
+            net_usd += ALLOC * float(r["pnl_pct"]) / 100
         except (ValueError, TypeError, KeyError):
             pass
 
@@ -1745,8 +1812,8 @@ def print_daily_activity() -> None:
     if worst and worst != best:
         print(f"  Worst open:  {worst} {worst_pnl:+.1f}%")
 
-    sign = "+" if net_eur >= 0 else ""
-    print(f"  Today's net: {sign}€{net_eur:.0f}  (€{ALLOC:.0f}/position × closed P&L)")
+    sign = "+" if net_usd >= 0 else ""
+    print(f"  Today's net: {sign}${net_usd:.0f}  ($100/position × closed P&L)")
     print(f"  {'─'*46}")
 
 
@@ -1762,17 +1829,10 @@ def print_scan_summary(
     rows = _read()
     _W = 54
 
-    try:
-        from src.connectors.coingecko import get_eur_usd_rate as _geur
-        _rate = _geur()
-    except Exception:
-        _rate = 0.92
-
     def _pe(usd: float) -> str:
-        eur = usd * _rate
-        if eur >= 1:    return f"€{eur:,.2f}"
-        if eur >= 0.01: return f"€{eur:.4f}"
-        return f"€{eur:.8f}"
+        if usd >= 1:    return f"${usd:,.2f}"
+        if usd >= 0.01: return f"${usd:.4f}"
+        return f"${usd:.8f}"
 
     fg_val   = (fear_greed or {}).get("value", "?")
     fg_label = (fear_greed or {}).get("label", "?")
@@ -1789,6 +1849,9 @@ def print_scan_summary(
     ]
     print(f"\n  OPEN POSITIONS ({len(scanner_open)}/{_MAX_OPEN_SCANNER} slots used):")
     if scanner_open:
+        _sc_by_coin: dict[str, int] = {}
+        for _r in scanner_open:
+            _sc_by_coin[_r["coin"].upper()] = _sc_by_coin.get(_r["coin"].upper(), 0) + 1
         for r in sorted(scanner_open, key=lambda x: x.get("date", ""), reverse=True):
             try:
                 entry = float(r.get("entry_price") or 0)
@@ -1797,7 +1860,8 @@ def print_scan_summary(
                 entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                 age = (datetime.now(timezone.utc) - entry_dt).days
                 icon = "+" if pnl >= 0 else "-"
-                print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%  ({age}d)  entry {_pe(entry)}  now {_pe(curr)}")
+                dca = " [DCA]" if _sc_by_coin.get(r["coin"].upper(), 0) > 1 else ""
+                print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%  ({age}d)  entry {_pe(entry)}  now {_pe(curr)}{dca}")
             except (ValueError, KeyError):
                 pass
     else:
@@ -1904,7 +1968,7 @@ def print_track_record() -> None:
         except Exception:
             pass
 
-        # Build high/low per coin since first buy date from price_history.csv
+        # Build high/low per coin from price_history.csv (USD)
         price_highs: dict[str, float] = {}
         price_lows:  dict[str, float] = {}
         if HISTORY_PATH.exists():
@@ -1913,33 +1977,29 @@ def print_track_record() -> None:
                     for row in csv.DictReader(f):
                         c = row.get("coin", "")
                         try:
-                            eur_p = float(row.get("price_eur") or 0)
-                            if eur_p <= 0:
+                            usd_p = float(row.get("price_usd") or 0)
+                            if usd_p <= 0:
                                 continue
-                            price_highs[c] = max(price_highs.get(c, 0), eur_p)
-                            price_lows[c]  = min(price_lows.get(c, eur_p), eur_p)
+                            price_highs[c] = max(price_highs.get(c, 0), usd_p)
+                            price_lows[c]  = min(price_lows.get(c, usd_p), usd_p)
                         except ValueError:
                             pass
             except Exception:
                 pass
 
-        total_value_eur    = 0.0
-        total_cost_eur_est = 0.0
-        total_no_entry_eur = 0.0
+        total_value_usd    = 0.0
+        total_cost_usd_est = 0.0
+        total_no_entry_usd = 0.0
 
         for coin, r in sorted(latest.items()):
             try:
                 usd = float(r["current_price"])
-                eur_raw = r.get("price_eur", "")
-                eur = float(eur_raw) if eur_raw else usd * 0.92
                 amt = amounts.get(coin, 0.0)
-                eur_value = amt * eur
+                usd_value = amt * usd
 
-                if eur_value < DUST_THRESHOLD_EUR:
-                    print(f"    [dust] {coin:8s}  {_fmt(eur, usd)}  value €{eur_value:.2f}")
+                if usd_value < DUST_THRESHOLD_USD:
+                    print(f"    [dust] {coin:8s}  {_fmt(0, usd)}  value ${usd_value:.2f}")
                     continue
-
-                rate = eur / usd if usd else 0.92  # current EUR/USD ratio
 
                 # Use Kraken trade history entry if available, else fall back to CSV entry_price
                 trade = trade_history.get(coin)
@@ -1947,50 +2007,47 @@ def print_track_record() -> None:
                     entry_usd = trade["avg_entry_usd"]
                     first_buy = trade["first_buy"]
                     fees_usd  = trade["total_fees_usd"]
-                    fees_eur  = fees_usd * rate
-                    entry_eur = entry_usd * rate
                     source_tag = "Kraken trades"
                 else:
                     entry_raw = r.get("entry_price", "")
                     entry_usd = float(entry_raw) if entry_raw else None
-                    entry_eur = entry_usd * rate if entry_usd else None
                     first_buy = ""
-                    fees_eur  = None
+                    fees_usd  = None
                     source_tag = "portfolio.json"
 
-                if entry_eur:
-                    cost_eur       = amt * entry_eur
-                    pnl_eur        = eur_value - cost_eur - (fees_eur or 0)
-                    pnl_pct        = pnl_eur / cost_eur * 100 if cost_eur else 0
-                    total_cost_eur_est += cost_eur
-                    total_value_eur    += eur_value
-                    icon = "+" if pnl_eur >= 0 else "-"
-                    entry_str = f"entry €{entry_eur:.4f}" + (f" on {first_buy}" if first_buy else "")
-                    fee_str   = f"  fee €{fees_eur:.2f}" if fees_eur else ""
-                    pnl_str   = f"P&L: €{pnl_eur:+.2f} ({pnl_pct:+.1f}%)"
-                    high_str  = f"  High: €{price_highs[coin]:.4f}" if coin in price_highs else ""
-                    low_str   = f"  Low: €{price_lows[coin]:.4f}"   if coin in price_lows  else ""
+                if entry_usd:
+                    cost_usd       = amt * entry_usd
+                    pnl_usd        = usd_value - cost_usd - (fees_usd or 0)
+                    pnl_pct        = pnl_usd / cost_usd * 100 if cost_usd else 0
+                    total_cost_usd_est += cost_usd
+                    total_value_usd    += usd_value
+                    icon = "+" if pnl_usd >= 0 else "-"
+                    entry_str = f"entry ${entry_usd:.4f}" + (f" on {first_buy}" if first_buy else "")
+                    fee_str   = f"  fee ${fees_usd:.2f}" if fees_usd else ""
+                    pnl_str   = f"P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)"
+                    high_str  = f"  High: ${price_highs[coin]:.4f}" if coin in price_highs else ""
+                    low_str   = f"  Low: ${price_lows[coin]:.4f}"   if coin in price_lows  else ""
                     print(
                         f"    [{icon}] {coin:8s}  {amt:.4f} × {entry_str}{fee_str}\n"
-                        f"           now {_fmt(eur, usd)}  value €{eur_value:.2f}"
+                        f"           now {_fmt(0, usd)}  value ${usd_value:.2f}"
                         f"  {pnl_str}{high_str}{low_str}"
                     )
                 else:
-                    total_no_entry_eur += eur_value  # tracked separately, excluded from P&L
+                    total_no_entry_usd += usd_value  # tracked separately, excluded from P&L
                     print(
-                        f"    [ ] {coin:8s}  now {_fmt(eur, usd)}"
-                        f"  value €{eur_value:.2f}  (no entry price — excluded from P&L)"
+                        f"    [ ] {coin:8s}  now {_fmt(0, usd)}"
+                        f"  value ${usd_value:.2f}  (no entry price — excluded from P&L)"
                     )
             except (ValueError, KeyError):
                 pass
 
-        total_pnl_eur = total_value_eur - total_cost_eur_est
-        total_pnl_pct = (total_pnl_eur / total_cost_eur_est * 100) if total_cost_eur_est else 0
-        icon = "+" if total_pnl_eur >= 0 else "-"
-        no_entry_note = f"  (+€{total_no_entry_eur:.2f} without entry)" if total_no_entry_eur else ""
+        total_pnl_usd = total_value_usd - total_cost_usd_est
+        total_pnl_pct = (total_pnl_usd / total_cost_usd_est * 100) if total_cost_usd_est else 0
+        icon = "+" if total_pnl_usd >= 0 else "-"
+        no_entry_note = f"  (+${total_no_entry_usd:.2f} without entry)" if total_no_entry_usd else ""
         print(
-            f"\n    [{icon}] TOTAL  invested ≈€{total_cost_eur_est:.2f}"
-            f"  now €{total_value_eur:.2f}  ({total_pnl_pct:+.1f}%){no_entry_note}"
+            f"\n    [{icon}] TOTAL  invested ≈${total_cost_usd_est:.2f}"
+            f"  now ${total_value_usd:.2f}  ({total_pnl_pct:+.1f}%){no_entry_note}"
         )
     else:
         print("    No portfolio data yet — run with --scan to populate.")
@@ -2060,39 +2117,52 @@ def print_track_record() -> None:
 
     open_scanner = [r for r in scanner_rows if r.get("status") == "OPEN"]
     if open_scanner:
-        try:
-            from src.connectors.coingecko import get_eur_usd_rate as _eur_rate_sc
-            _sc_rate = _eur_rate_sc()
-        except Exception:
-            _sc_rate = 0.88
+        # Group by coin to detect DCA
+        _open_by_coin: dict[str, int] = {}
+        for r in open_scanner:
+            _open_by_coin[r["coin"].upper()] = _open_by_coin.get(r["coin"].upper(), 0) + 1
+
         print(f"\n  OPEN POSITIONS:")
         for r in sorted(open_scanner, key=lambda x: x.get("date", ""), reverse=True):
             try:
                 entry_usd = float(r.get("entry_price") or 0)
                 usd       = float(r.get("current_price") or 0) or entry_usd
                 pnl       = (usd - entry_usd) / entry_usd * 100 if entry_usd > 0 else float(r.get("pnl_pct") or 0)
-                eur       = usd * _sc_rate
                 icon      = "+" if pnl >= 0 else "-"
                 entry_dt  = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                 days_open = (datetime.now(timezone.utc) - entry_dt).days
+                pid_tag   = f"  [{r['position_id']}]" if r.get("position_id") else ""
+                dca_tag   = "  [DCA]" if _open_by_coin.get(r["coin"].upper(), 0) > 1 else ""
                 print(
                     f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
                     f"  ({days_open}d)"
-                    f"  entry {_usd_to_eur(entry_usd)}  now {_fmt(eur, usd)}"
+                    f"  entry {_usd_to_eur(entry_usd)}  now {_usd_to_eur(usd)}"
+                    f"{dca_tag}{pid_tag}"
                 )
             except (ValueError, KeyError):
                 pass
 
+        # Show avg entry for coins with multiple DCA positions
+        for coin_u, cnt in _open_by_coin.items():
+            if cnt > 1:
+                dca_rows = [r for r in open_scanner if r["coin"].upper() == coin_u]
+                try:
+                    entries = [float(r["entry_price"]) for r in dca_rows if r.get("entry_price")]
+                    if entries:
+                        avg_e = sum(entries) / len(entries)
+                        print(f"    ↳ {coin_u} avg entry (DCA {cnt} positions): {_usd_to_eur(avg_e)}")
+                except Exception:
+                    pass
+
     # ── Closed trades with individual P&L ────────────────────────────────
     closed_scanner = [r for r in scanner_rows if r.get("status") in ("WIN", "LOSS", "TIME EXIT", "EXPIRED")]
     if closed_scanner:
-        # Sort by date descending, show last 20
-        closed_sorted = sorted(closed_scanner, key=lambda x: x.get("date", ""), reverse=True)[:20]
+        # Sort by date descending, show last 30 (Problem: requested 30 instead of 20)
+        closed_sorted = sorted(closed_scanner, key=lambda x: x.get("date", ""), reverse=True)[:30]
         wins_shown  = [r for r in closed_sorted if r.get("status") == "WIN"]
         losses_shown = [r for r in closed_sorted if r.get("status") == "LOSS"]
 
         # Build re-open map: coin → list of prior closed statuses (ordered by date)
-        # Used to label re-opened positions in display
         _coin_history: dict[str, list[dict]] = {}
         for r in sorted(closed_scanner, key=lambda x: x.get("date", "")):
             _coin_history.setdefault(r["coin"].upper(), []).append(r)
@@ -2107,7 +2177,7 @@ def print_track_record() -> None:
                 icon   = "WIN " if status == "WIN" else ("TIME" if status == "TIME EXIT" else "LOSS")
                 date   = r["date"][:10]   # YYYY-MM-DD
                 coin   = r["coin"].upper()
-                # Detect re-opens: this row is not the first closed trade for this coin
+                # Detect re-opens
                 history = _coin_history.get(coin, [])
                 this_idx = next((i for i, h in enumerate(history) if h is r), -1)
                 reopen_tag = ""
@@ -2193,7 +2263,7 @@ def print_track_record() -> None:
         )
 
         print(f"\n  {'─'*_W}")
-        print(f"  WHALE RIDES  ({len(whale_rows)} positions  |  {ms_unique} hit +25%  |  {ms_events} milestones)")
+        print(f"  WHALE RIDES  ({len(whale_rows)} positions  |  {ms_unique} hit +15%  |  {ms_events} milestones)")
         print(f"  {'─'*_W}")
         _win_rate = (_total_wins / (_total_wins + _pure_loss) * 100) if (_total_wins + _pure_loss) else 0
         print(f"  Open: {wr_open}  Closed: {wr_closed}  Pure loss: {_pure_loss}")
@@ -2204,11 +2274,6 @@ def print_track_record() -> None:
 
         open_wr = [r for r in whale_rows if r.get("status") == "OPEN"]
         if open_wr:
-            try:
-                from src.connectors.coingecko import get_eur_usd_rate as _eur_rate_wr
-                _wr_rate = _eur_rate_wr()
-            except Exception:
-                _wr_rate = 0.88
             print(f"\n  OPEN WHALE RIDES:")
             import re as _re2
             for r in open_wr:
@@ -2216,30 +2281,32 @@ def print_track_record() -> None:
                     entry_usd = float(r.get("entry_price") or 0)
                     usd       = float(r.get("current_price") or 0) or entry_usd
                     pnl       = (usd - entry_usd) / entry_usd * 100 if entry_usd > 0 else float(r.get("pnl_pct") or 0)
-                    eur       = usd * _wr_rate
                     icon      = "+" if pnl >= 0 else "-"
                     reasoning = r.get("reasoning", "")
                     entry_dt  = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                     hrs_open  = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
 
                     if "[WHALE_RIDER]" in reasoning:
-                        # Pump-follower alert — no fixed SL/TP, manual trade
                         sm = _re2.search(r"\[WHALE_RIDER\]\s+(\w+)", reasoning)
                         stage_tag = f"  [{sm.group(1)}]" if sm else ""
+                        m_wr = _re2.search(r"max_hold:\s*(\d+)h", reasoning)
+                        max_hold_wr = int(m_wr.group(1)) if m_wr else 24
+                        hrs_left_wr = max(0, max_hold_wr - hrs_open)
                         print(
                             f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
-                            f"  ({hrs_open:.0f}h)  entry {_usd_to_eur(float(r['entry_price']))}"
-                            f"  now {_fmt(eur, usd)}{stage_tag}  Manual trade"
+                            f"  ({hrs_open:.0f}/{max_hold_wr}h, {hrs_left_wr:.0f}h left)"
+                            f"  entry {_usd_to_eur(float(r['entry_price']))}"
+                            f"  now {_usd_to_eur(usd)}{stage_tag}  Manual trade"
                         )
                     else:
                         scam     = "  ⚠️ SERIAL SCAM" if "SERIAL SCAM" in reasoning else ""
                         m2       = _re2.search(r"max_hold:\s*(\d+)h", reasoning)
-                        max_hold = int(m2.group(1)) if m2 else 48
+                        max_hold = int(m2.group(1)) if m2 else 24
                         hrs_left = max(0, max_hold - hrs_open)
                         print(
                             f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
                             f"  ({hrs_open:.0f}/{max_hold}h, {hrs_left:.0f}h left)"
-                            f"  entry {_usd_to_eur(float(r['entry_price']))}  now {_fmt(eur, usd)}{scam}"
+                            f"  entry {_usd_to_eur(float(r['entry_price']))}  now {_usd_to_eur(usd)}{scam}"
                         )
                 except (ValueError, KeyError):
                     pass

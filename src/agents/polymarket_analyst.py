@@ -745,7 +745,7 @@ def print_polymarket_picks(picks: list[dict]) -> None:
         n = len(top_bets)
         label = f"TOP {n} POLYMARKET BET{'S' if n != 1 else ''}"
         print("\n" + "=" * 60)
-        print(f"  {label}  (each €100 allocation)")
+        print(f"  {label}  (each $100 allocation)")
         print("=" * 60)
         for i, (edge_f, p) in enumerate(top_bets, 1):
             verdict  = p.get("llm_verdict", "?")
@@ -758,7 +758,7 @@ def print_polymarket_picks(picks: list[dict]) -> None:
             est_str  = f", est.prob {llm_prob:.0f}%" if isinstance(llm_prob, (int, float)) else ""
             sign     = "+" if edge_f >= 0 else ""
             print(f"  {i}. {verdict} on \"{question[:60]}\"")
-            print(f"     odds {odds_str}{est_str}, edge {sign}{edge_f:.0f}pp — bet €100")
+            print(f"     odds {odds_str}{est_str}, edge {sign}{edge_f:.0f}pp — bet $100")
             if url:
                 print(f"     {url}")
         print("=" * 60)

@@ -1,10 +1,8 @@
 {
     "holdings": [
-        {"asset": "INJ", "coin_id": "injective-protocol", "amount": 28, "entry_price_usd": 2.85, "entry_date": "2026-03-06"},
-        {"asset": "RENDER", "coin_id": "render-token", "amount": 41, "entry_price_usd": 1.21, "entry_date": "2026-03-06"},
-        {"asset": "DOT", "coin_id": "polkadot", "amount": 26, "entry_price_usd": 1.52, "entry_date": "2026-03-06"}
+        {"asset": "IMX", "coin_id": "immutable-x", "amount": 752, "entry_price_usd": null, "entry_date": null}
     ],
-    "total_invested_eur": 150,
+    "total_invested_usd": 165,
     "risk_rules": {
         "max_position_pct": 20,
         "max_daily_loss_pct": 5,

@@ -369,7 +369,7 @@ def _sched_loop(exchange, debate, stocks_only=False):
 def _price_fmt(val: float, decimals: int | None = None) -> str:
     if decimals is None:
         decimals = 2 if val >= 1 else 4 if val >= 0.01 else 6 if val >= 0.0001 else 8
-    return f"€{val:.{decimals}f}"
+    return f"${val:.{decimals}f}"
 
 
 def _pnl_html(pct: float | None) -> str:
@@ -436,7 +436,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("<div style='font-size:0.72rem;font-weight:700;color:#38bdf8;letter-spacing:0.08em;margin-bottom:6px'>⚡ SCANNER CONTROLS</div>", unsafe_allow_html=True)
 
-    _exch_map = {"All Exchanges":None,"Kraken":"kraken","Binance":"binance","Revolut":"revolut","Kraken+Revolut":"both","All (3 exchanges)":"all"}
+    _exch_map = {"All Exchanges":None,"Binance":"binance","Revolut":"revolut","All (Revolut+Binance)":"all"}
     _exch_label = st.selectbox("Exchange", list(_exch_map.keys()), label_visibility="collapsed")
     _exch_val   = _exch_map[_exch_label]
     _debate_val = st.toggle("🥊 Bull/Bear Debate", value=False)
@@ -507,6 +507,15 @@ def load_live_prices() -> dict:
     try:
         from src.connectors.coingecko import fetch_prices
         coin_ids: set[str] = set()
+        # Try live Kraken holdings first (source of truth for amounts)
+        try:
+            from src.connectors.kraken import fetch_kraken_portfolio, _COIN_IDS as _KRK_IDS
+            kh, _ = fetch_kraken_portfolio()
+            if kh:
+                coin_ids.update(h["coin_id"] for h in kh if h.get("coin_id"))
+        except Exception:
+            pass
+        # Fallback: portfolio.json coin_ids
         try:
             pf = json.load(open(config.PORTFOLIO_PATH))
             coin_ids.update(h["coin_id"] for h in pf.get("holdings",[]) if h.get("coin_id"))
@@ -641,12 +650,10 @@ if page == "🚀 Run Scanner":
     col_a, col_b = st.columns([2, 2])
     with col_a:
         exch_map = {
-            "All Exchanges": None,
-            "Kraken":        "kraken",
-            "Binance":       "binance",
-            "Revolut X":     "revolut",
-            "Kraken + Revolut": "both",
-            "All (3)":       "all",
+            "All Exchanges":        None,
+            "Binance":              "binance",
+            "Revolut X":            "revolut",
+            "All (Revolut+Binance)":"all",
         }
         exch_label = st.selectbox("Exchange", list(exch_map.keys()), label_visibility="visible")
         exch_val   = exch_map[exch_label]
@@ -701,8 +708,8 @@ elif page == "📊 Overview":
     poly            = load_polymarket()
 
     # KPI row
-    total_eur = sum(
-        h["amount"] * prices[h["coin_id"]].price_eur
+    total_usd = sum(
+        h["amount"] * prices[h["coin_id"]].price_usd
         for h in holdings if h.get("coin_id") in prices
     )
     scanner_df = df[df.get("type",pd.Series(dtype=str)).isin(["SCANNER",""])] if not df.empty and "type" in df.columns else df
@@ -712,7 +719,7 @@ elif page == "📊 Overview":
     wr      = f"{n_win/(n_win+n_loss)*100:.0f}%" if (n_win+n_loss)>0 else "—"
 
     c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("💰 Portfolio",      f"€{total_eur:,.2f}")
+    c1.metric("💰 Portfolio",      f"${total_usd:,.2f}")
     c2.metric("😨 Fear & Greed",   f"{fg['value']}/100", fg["label"])
     c3.metric("📂 Open Picks",     n_open)
     c4.metric("🏆 Win Rate",       wr, f"{n_win}W / {n_loss}L")
@@ -730,14 +737,14 @@ elif page == "📊 Overview":
             if not p:
                 continue
             arr = "▲" if p.change_24h > 0 else "▼" if p.change_24h < 0 else "—"
-            decimals = 2 if p.price_eur >= 1 else 4 if p.price_eur >= 0.01 else 6 if p.price_eur >= 0.0001 else 8
+            decimals = 2 if p.price_usd >= 1 else 4 if p.price_usd >= 0.01 else 6 if p.price_usd >= 0.0001 else 8
             rows.append({
                 "":       arr,
                 "Symbol": p.symbol,
-                "EUR":    f"€{p.price_eur:.{decimals}f}",
+                "USD":    f"${p.price_usd:.{decimals}f}",
                 "24h %":  f"{p.change_24h:+.2f}%",
                 "7d %":   f"{p.change_7d:+.2f}%",
-                "MCap":   f"€{p.market_cap/1e6:.0f}M",
+                "MCap":   f"${p.market_cap/1e6:.0f}M",
             })
         if rows:
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -821,17 +828,17 @@ elif page == "💼 Portfolio":
         if not p:
             continue
         amt     = h["amount"]
-        eur_val = amt * p.price_eur
-        if eur_val < 0.10:
+        usd_val = amt * p.price_usd
+        if usd_val < 0.12:
             continue
-        entry   = h.get("entry_price_usd")
-        pnl_pct = ((p.price_usd - entry)/entry*100) if entry else None
+        entry_usd = h.get("entry_price_usd")
+        pnl_pct = ((p.price_usd - entry_usd)/entry_usd*100) if entry_usd else None
         rows.append({
             "Asset":    h["asset"],
             "Amount":   amt,
-            "Price €":  p.price_eur,
-            "Value €":  round(eur_val,2),
-            "Entry $":  entry,
+            "Price $":  p.price_usd,
+            "Value $":  round(usd_val,2),
+            "Entry $":  round(entry_usd, 6) if entry_usd else None,
             "P&L %":    round(pnl_pct,2) if pnl_pct is not None else None,
             "24h %":    round(p.change_24h,2),
             "7d %":     round(p.change_7d,2),
@@ -843,22 +850,20 @@ elif page == "💼 Portfolio":
         st.info("No holdings found. Check Kraken API or portfolio.json.")
     else:
         port_df   = pd.DataFrame(rows)
-        total_eur = port_df["Value €"].sum()
+        total_usd = port_df["Value $"].sum()
 
-        cost_eur = 0.0
+        cost_usd = 0.0
         for r in rows:
             ep = r["Entry $"]
             if ep:
-                p = prices.get(r["_coin_id"])
-                if p and p.price_usd:
-                    cost_eur += r["Amount"] * ep * (p.price_eur / p.price_usd)
+                cost_usd += r["Amount"] * ep
 
-        total_pnl     = total_eur - cost_eur
-        total_pnl_pct = (total_pnl/cost_eur*100) if cost_eur > 0 else 0
+        total_pnl     = total_usd - cost_usd
+        total_pnl_pct = (total_pnl/cost_usd*100) if cost_usd > 0 else 0
 
         c1,c2,c3 = st.columns(3)
-        c1.metric("Total Value",   f"€{total_eur:,.2f}")
-        c2.metric("Total P&L",     f"€{total_pnl:+,.2f}", f"{total_pnl_pct:+.1f}%")
+        c1.metric("Total Value",   f"${total_usd:,.2f}")
+        c2.metric("Total P&L",     f"${total_pnl:+,.2f}", f"{total_pnl_pct:+.1f}%")
         c3.metric("Positions",     len(rows))
 
         st.markdown("---")
@@ -871,13 +876,13 @@ elif page == "💼 Portfolio":
                 arr    = "▲" if r["24h %"] > 0 else "▼"
                 cls24  = "pos" if r["24h %"] > 0 else "neg"
                 amt_dec = 2 if r["Amount"]>=1 else 4 if r["Amount"]>=0.01 else 6
-                decimals = 2 if r["Price €"]>=1 else 4 if r["Price €"]>=0.01 else 6 if r["Price €"]>=0.0001 else 8
+                decimals = 2 if r["Price $"]>=1 else 4 if r["Price $"]>=0.01 else 6 if r["Price $"]>=0.0001 else 8
                 st.markdown(
                     f'<div class="glass">'
                     f'<b style="font-size:1.15rem;color:#f0f8ff">{r["Asset"]}</b>'
                     f'<span style="float:right;color:#4a7a9b;font-size:0.85rem">{r["Amount"]:.{amt_dec}f}</span><br>'
-                    f'<span style="font-size:1.35rem;color:#38bdf8;font-weight:700">€{r["Price €"]:.{decimals}f}</span><br>'
-                    f'<span style="color:#94b8d8">Value:</span> <b>€{r["Value €"]:.2f}</b>'
+                    f'<span style="font-size:1.35rem;color:#38bdf8;font-weight:700">${r["Price $"]:.{decimals}f}</span><br>'
+                    f'<span style="color:#94b8d8">Value:</span> <b>${r["Value $"]:.2f}</b>'
                     f'&nbsp;&nbsp;<span style="color:#94b8d8">P&L:</span> {pnl_h}<br>'
                     f'<span class="{cls24}">{arr} {r["24h %"]:+.2f}% (24h)</span>'
                     f'</div>',
@@ -890,7 +895,7 @@ elif page == "💼 Portfolio":
         with col_pie:
             st.markdown("### Allocation")
             fig_pie = px.pie(
-                port_df, values="Value €", names="Asset",
+                port_df, values="Value $", names="Asset",
                 color_discrete_sequence=AERO_PALETTE, hole=0.42,
             )
             fig_pie.update_traces(textinfo="label+percent", textfont_color="#f0f8ff",
@@ -907,7 +912,7 @@ elif page == "💼 Portfolio":
                 return ""
             st.dataframe(
                 disp.style.applymap(_color, subset=["P&L %","24h %","7d %"])
-                    .format({"Amount":".4f","Price €":"€{:.4f}","Value €":"€{:.2f}",
+                    .format({"Amount":".4f","Price $":"${:.4f}","Value $":"${:.2f}",
                              "Entry $":"${:.4f}","P&L %":"{:+.2f}%",
                              "24h %":"{:+.2f}%","7d %":"{:+.2f}%"}, na_rep="—"),
                 use_container_width=True, hide_index=True,
@@ -919,33 +924,26 @@ elif page == "💼 Portfolio":
             st.markdown("### Price History")
             avail = hist["coin"].unique().tolist()
             sel = st.multiselect("Coins", avail, default=avail[:4])
-            cur = st.radio("Currency", ["EUR","USD"], horizontal=True)
-            pc  = "price_eur" if cur=="EUR" else "price_usd"
-            sym = "€" if cur=="EUR" else "$"
 
             entry_map: dict[str,float] = {}
             for h in holdings:
                 ep = h.get("entry_price_usd")
                 if ep:
-                    po = prices.get(h.get("coin_id",""))
-                    if cur=="EUR" and po and po.price_usd:
-                        entry_map[h["asset"]] = ep * (po.price_eur/po.price_usd)
-                    else:
-                        entry_map[h["asset"]] = ep
+                    entry_map[h["asset"]] = ep
 
             if sel:
                 fig_h = go.Figure()
                 for i, coin in enumerate(sel):
                     cd = hist[hist["coin"]==coin].sort_values("timestamp")
-                    fig_h.add_trace(go.Scatter(x=cd["timestamp"],y=cd[pc],name=coin,mode="lines",
+                    fig_h.add_trace(go.Scatter(x=cd["timestamp"],y=cd["price_usd"],name=coin,mode="lines",
                         line=dict(color=AERO_PALETTE[i%len(AERO_PALETTE)],width=2),
                         fill="tozeroy",fillcolor=f"rgba({','.join(str(int(AERO_PALETTE[i%len(AERO_PALETTE)].lstrip('#')[j*2:j*2+2],16)) for j in range(3))},0.06)"))
                     if len(sel)==1 and coin in entry_map:
                         fig_h.add_hline(y=entry_map[coin],line_color="#fbbf24",line_dash="dash",
-                            annotation_text=f"Entry {sym}{entry_map[coin]:.4f}",
+                            annotation_text=f"Entry ${entry_map[coin]:.4f}",
                             annotation_position="bottom right")
                 fig_h.update_layout(height=380, hovermode="x unified",
-                                    xaxis_title="", yaxis_title=f"Price ({cur})", **PLOT_LAYOUT)
+                                    xaxis_title="", yaxis_title="Price (USD)", **PLOT_LAYOUT)
                 st.plotly_chart(fig_h, use_container_width=True)
 
 
@@ -1034,7 +1032,6 @@ elif page == "🎯 Scanner Picks":
                         pass
 
                 price_dec = 4 if curr_usd and float(curr_usd)<1 else 2
-                eur_str   = f" (€{float(curr_eur):.6f})" if curr_eur else ""
                 reasoning = str(row.get("reasoning",""))
                 web_tag = ""
                 if "WEB RESEARCH: CONFIRM" in reasoning or "web_research_verdict" in reasoning:
@@ -1048,7 +1045,7 @@ elif page == "🎯 Scanner Picks":
                     f'<span style="float:right">{_status_badge("OPEN")}'
                     f'{"&nbsp;<span style=\"color:#f87171;font-size:0.72rem\">🔴 live</span>" if live_p else ""}</span><br>'
                     f'Entry: <b style="color:#f0f8ff">${float(entry):.{price_dec}f}</b>'
-                    f'&nbsp;→&nbsp;Now: <b style="color:#f0f8ff">${float(curr_usd):.{price_dec}f}</b>{eur_str}'
+                    f'&nbsp;→&nbsp;Now: <b style="color:#f0f8ff">${float(curr_usd) if curr_usd else 0:.{price_dec}f}</b>'
                     f'&nbsp;&nbsp;P&L: {_pnl_html(pnl)}{web_tag}'
                     f'{bar_html}'
                     f'<br><small style="color:#4a7a9b">{str(row.get("date",""))[:16]}'
@@ -1272,7 +1269,7 @@ elif page == "📈 Charts":
                         ci1.metric("Price",f"{sym}{lval:.6f}")
                         ci2.metric("24h",f"{live_p.change_24h:+.2f}%")
                         ci3.metric("7d", f"{live_p.change_7d:+.2f}%")
-                        ci4.metric("MCap",f"€{live_p.market_cap/1e6:.0f}M")
+                        ci4.metric("MCap",f"${live_p.market_cap/1e6:.0f}M")
 
 
 # ═════════════════════════════════════════════════════════════════════════

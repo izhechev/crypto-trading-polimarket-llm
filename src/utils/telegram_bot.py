@@ -92,18 +92,18 @@ def _handle_portfolio(chat_id: int) -> None:
             return
 
         prices = {p.coin_id: p for p in fetch_prices(coin_ids)}
-        DUST = 0.10
+        DUST = 0.12
 
         lines = [f"<b>PORTFOLIO</b> (source: {source})\n"]
-        total_eur = 0.0
+        total_usd = 0.0
         for h in holdings:
             p = prices.get(h.get("coin_id", ""))
             if not p:
                 continue
             amt = h["amount"]
-            eur_value = amt * p.price_eur
-            if eur_value < DUST:
-                lines.append(f"[dust] {h['asset']}  €{eur_value:.4f}")
+            usd_value = amt * p.price_usd
+            if usd_value < DUST:
+                lines.append(f"[dust] {h['asset']}  ${usd_value:.4f}")
                 continue
             entry = h.get("entry_price_usd")
             if entry:
@@ -111,14 +111,14 @@ def _handle_portfolio(chat_id: int) -> None:
                 pnl_str = f"  P&amp;L: {pnl_pct:+.1f}%"
             else:
                 pnl_str = ""
-            decimals = 2 if p.price_eur >= 1 else 4 if p.price_eur >= 0.01 else 6 if p.price_eur >= 0.0001 else 8
+            decimals = 2 if p.price_usd >= 1 else 4 if p.price_usd >= 0.01 else 6 if p.price_usd >= 0.0001 else 8
             lines.append(
-                f"<b>{h['asset']}</b>  {amt:.4f} × €{p.price_eur:.{decimals}f}"
-                f" = €{eur_value:.2f}{pnl_str}"
+                f"<b>{h['asset']}</b>  {amt:.4f} × ${p.price_usd:.{decimals}f}"
+                f" = ${usd_value:.2f}{pnl_str}"
             )
-            total_eur += eur_value
+            total_usd += usd_value
 
-        lines.append(f"\n<b>TOTAL: €{total_eur:.2f}</b>")
+        lines.append(f"\n<b>TOTAL: ${total_usd:.2f}</b>")
         _reply(chat_id, "\n".join(lines))
 
     except Exception as e:
@@ -259,10 +259,10 @@ def _handle_price(chat_id: int, args: list[str]) -> None:
         arrow = "↑" if p.change_24h > 0 else "↓" if p.change_24h < 0 else "→"
         msg = (
             f"<b>{p.symbol} — {p.name}</b>\n\n"
-            f"Price:  €{p.price_eur:.{decimals}f}  (${p.price_usd:.{decimals}f})\n"
+            f"Price:  ${p.price_usd:.{decimals}f}\n"
             f"24h:    {arrow} {p.change_24h:+.1f}%\n"
             f"7d:     {p.change_7d:+.1f}%\n"
-            f"MCap:   €{p.market_cap / 1e6:.0f}M"
+            f"MCap:   ${p.market_cap / 1e6:.0f}M"
         )
         if ta_lines:
             msg += "\n" + "\n".join(ta_lines)
@@ -436,7 +436,7 @@ def _handle_analyze(chat_id: int, args: list[str]) -> None:
 
             msg = (
                 f"<b>{symbol} — Full Analysis</b>\n\n"
-                f"Price: €{p.price_eur:.{decimals}f}  (${p.price_usd:.{decimals}f})\n"
+                f"Price: ${p.price_usd:.{decimals}f}\n"
                 f"24h: {p.change_24h:+.1f}%  |  7d: {p.change_7d:+.1f}%\n\n"
                 f"<b>TA:</b> {trend_icon} {ta.trend}"
             )
@@ -461,7 +461,7 @@ def _handle_analyze(chat_id: int, args: list[str]) -> None:
             # Fallback: TA-only summary if Groq fails
             msg = (
                 f"<b>{symbol} — TA Summary</b> (LLM unavailable: {e})\n\n"
-                f"Price: €{p.price_eur:.{decimals}f}  (${p.price_usd:.{decimals}f})\n"
+                f"Price: ${p.price_usd:.{decimals}f}\n"
                 f"24h: {p.change_24h:+.1f}%  |  7d: {p.change_7d:+.1f}%\n\n"
                 f"Trend: {trend_icon} {ta.trend} ({ta.confidence:.0%})\n"
             )

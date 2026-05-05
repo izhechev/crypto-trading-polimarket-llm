@@ -482,17 +482,14 @@ Having 10 picks is mandatory so the portfolio always has fresh candidates to ope
             _pick["entry_price"] = _price_map[_sym]
             print(f"  [entry_price] {_sym}: backfilled from scanner (Groq returned null)")
 
-    from src.connectors.coingecko import get_eur_usd_rate as _groq_eur_rate
-    _groq_eur = _groq_eur_rate()
-
     def _fmt(val):
         if not isinstance(val, (int, float)):
             return str(val)
-        v = val * _groq_eur
-        if v == 0:   return "€0"
-        if v >= 1:   return f"€{v:,.2f}"
-        if v >= 0.01: return f"€{v:.4f}"
-        return f"€{v:.8f}"
+        v = val
+        if v == 0:   return "$0"
+        if v >= 1:   return f"${v:,.2f}"
+        if v >= 0.01: return f"${v:.4f}"
+        return f"${v:.8f}"
 
     def _apply_guards(rec: dict) -> dict:
         """Apply TP cap, RSI guard, and F&G filter to a single pick. Mutates in place."""

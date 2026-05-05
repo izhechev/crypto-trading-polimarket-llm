@@ -317,7 +317,7 @@ if __name__ == "__main__":
     print("=== Fetching prices ===")
     prices = fetch_prices(["bitcoin", "injective-protocol", "render-token", "polkadot", "ethereum"])
     for p in prices:
-        print(f"  {p.symbol}: €{p.price_eur:.2f} (${p.price_usd:.2f})  {p.change_24h:+.1f}% 24h")
+        print(f"  {p.symbol}: ${p.price_usd:.2f}  {p.change_24h:+.1f}% 24h")
 
     print("\n=== Fear & Greed ===")
     fg = fetch_fear_greed()

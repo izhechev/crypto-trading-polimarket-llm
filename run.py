@@ -69,10 +69,9 @@ def run_price_check():
     prices = fetch_prices(WATCHLIST)
     for p in prices:
         icon = "🟢" if p.change_24h > 0 else "🔴" if p.change_24h < 0 else "⚪"
-        decimals = 2 if p.price_eur >= 1 else 4 if p.price_eur >= 0.01 else 6 if p.price_eur >= 0.0001 else 8
-        eur_str = f"€{p.price_eur:.{decimals}f}"
+        decimals = 2 if p.price_usd >= 1 else 4 if p.price_usd >= 0.01 else 6 if p.price_usd >= 0.0001 else 8
         usd_str = f"${p.price_usd:.{decimals}f}"
-        print(f"  {icon} {p.symbol:8s}  {eur_str:>14s}  ({usd_str:>14s})  {p.change_24h:+.1f}% 24h  {p.change_7d:+.1f}% 7d  MCap €{p.market_cap/1e6:.0f}M")
+        print(f"  {icon} {p.symbol:8s}  {usd_str:>14s}  {p.change_24h:+.1f}% 24h  {p.change_7d:+.1f}% 7d  MCap ${p.market_cap/1e6:.0f}M")
     return {p.coin_id: p for p in prices}
 
 
@@ -116,37 +115,35 @@ def run_technical_analysis(prices: dict):
 def run_portfolio_check(prices: dict):
     print_header("PORTFOLIO")
     portfolio = load_portfolio()
-    total_eur = total_cost_eur = 0.0
-    DUST = 0.10
+    total_usd = total_cost_usd = 0.0
+    DUST = 0.12
     for h in portfolio["holdings"]:
         p = prices.get(h["coin_id"])
         if not p:
             continue
-        amt = h["amount"]
-        eur_value = amt * p.price_eur
+        amt       = h["amount"]
         usd_value = amt * p.price_usd
-        cost_usd  = amt * h["entry_price_usd"]
-        # Estimate EUR entry cost using current EUR/USD rate
-        rate      = p.price_eur / p.price_usd if p.price_usd else 0.92
-        cost_eur  = cost_usd * rate
-        pnl_pct   = (p.price_usd - h["entry_price_usd"]) / h["entry_price_usd"] * 100
+        entry_usd = h.get("entry_price_usd")
+        cost_usd  = amt * entry_usd if entry_usd else 0.0
+        pnl_pct   = (p.price_usd - entry_usd) / entry_usd * 100 if entry_usd else None
 
-        if eur_value < DUST:
-            print(f"  [dust] {h['asset']:8s}  €{p.price_eur:.4f}  value €{eur_value:.4f}")
+        if usd_value < DUST:
+            print(f"  [dust] {h['asset']:8s}  ${p.price_usd:.4f}  value ${usd_value:.4f}")
             continue
 
-        total_eur      += eur_value
-        total_cost_eur += cost_eur
-        icon = "🟢" if pnl_pct >= 0 else "🔴"
-        decimals = 2 if p.price_eur >= 1 else 4 if p.price_eur >= 0.01 else 6 if p.price_eur >= 0.0001 else 8
+        total_usd      += usd_value
+        total_cost_usd += cost_usd
+        icon = "🟢" if (pnl_pct or 0) >= 0 else "🔴"
+        decimals = 2 if p.price_usd >= 1 else 4 if p.price_usd >= 0.01 else 6 if p.price_usd >= 0.0001 else 8
+        pnl_str = f"P&L: {pnl_pct:+.1f}%" if pnl_pct is not None else "P&L: n/a"
         print(
-            f"  {icon} {h['asset']:8s} {amt:>6.1f} × €{p.price_eur:.{decimals}f}"
-            f" = €{eur_value:>8.2f}  (entry ${h['entry_price_usd']:.4f}, P&L: {pnl_pct:+.1f}%)"
+            f"  {icon} {h['asset']:8s} {amt:>6.1f} × ${p.price_usd:.{decimals}f}"
+            f" = ${usd_value:>8.2f}  ({pnl_str})"
         )
-    total_pnl_eur = total_eur - total_cost_eur
-    total_pnl_pct = (total_pnl_eur / total_cost_eur) * 100 if total_cost_eur else 0
-    icon = "🟢" if total_pnl_eur >= 0 else "🔴"
-    print(f"\n  {icon} TOTAL: €{total_eur:.2f} / invested ≈€{total_cost_eur:.2f} / P&L: €{total_pnl_eur:+.2f} ({total_pnl_pct:+.1f}%)")
+    total_pnl_usd = total_usd - total_cost_usd
+    total_pnl_pct = (total_pnl_usd / total_cost_usd) * 100 if total_cost_usd else 0
+    icon = "🟢" if total_pnl_usd >= 0 else "🔴"
+    print(f"\n  {icon} TOTAL: ${total_usd:.2f} / invested ≈${total_cost_usd:.2f} / P&L: ${total_pnl_usd:+.2f} ({total_pnl_pct:+.1f}%)")
 
 
 # ── Whale ride check (every 15 min) ──────────────────────────────────────────
@@ -314,6 +311,9 @@ def run_whale_check() -> None:
     No Groq, no full TA — fastest possible whale catch.
     """
     try:
+        from src.utils.logger import update_open_positions
+        update_open_positions()
+
         from src.agents.coin_risk_assessor import assess_coin_risks
         from src.agents.whale_rider import (
             detect_whale_rides,
@@ -342,6 +342,42 @@ def run_whale_check() -> None:
             print(f"  {before} coins → {len(coins)} Kraken-listed (filtered)")
         else:
             print(f"  {len(coins)} coins (no Kraken filter — symbol list unavailable)")
+
+        # ── Live Price Refresh ────────────────────────────────────────────────
+        # The coin list above is heavily cached (4 hours) to save API calls.
+        # We MUST refresh the prices/volumes right now to prevent stale alerts.
+        try:
+            import httpx
+            from src.connectors.coingecko import _headers as _cg_headers
+            # Get CG IDs for all coins
+            cg_ids = [c.get("id") or c.get("_cg_id") for c in coins if c.get("id") or c.get("_cg_id")]
+            if cg_ids:
+                # We need both price and volume to detect whale rides correctly.
+                # simple/price gives us 24h vol and price in one fast call.
+                cg_resp = httpx.get(
+                    "https://api.coingecko.com/api/v3/simple/price",
+                    params={
+                        "ids": ",".join(cg_ids),
+                        "vs_currencies": "usd",
+                        "include_24hr_vol": "true",
+                        "include_24hr_change": "true"
+                    },
+                    headers=_cg_headers(),
+                    timeout=15,
+                )
+                if cg_resp.status_code == 200:
+                    live_data = cg_resp.json()
+                    updated = 0
+                    for c in coins:
+                        cid = c.get("id") or c.get("_cg_id")
+                        if cid and cid in live_data:
+                            c["current_price"] = live_data[cid].get("usd", c.get("current_price"))
+                            c["total_volume"]  = live_data[cid].get("usd_24h_vol", c.get("total_volume"))
+                            c["price_change_percentage_24h"] = live_data[cid].get("usd_24h_change", c.get("price_change_percentage_24h"))
+                            updated += 1
+                    print(f"  Live price/vol refreshed for {updated} coins")
+        except Exception as e:
+            print(f"  ⚠️  Live price refresh failed (falling back to cache): {e}")
 
         fg       = fetch_fear_greed()
         vol_hist = update_volume_history(coins)
@@ -473,13 +509,10 @@ def run_scan_cycle(
     except Exception as _e_pm:
         print(f"  ⚠️  Portfolio alert check failed: {_e_pm}")
 
-    # Log current portfolio holdings with live prices (Kraken → portfolio.json fallback)
-    print(f"  💼  Logging portfolio positions...")
-    log_portfolio_positions()
+    # log_portfolio_positions()  # disabled — portfolio price fetch causing RetryError
 
     # Log watchlist coin prices
-    print(f"  👀  Logging watchlist prices...")
-    log_watchlist_prices()
+    # log_watchlist_prices()  # disabled — same RetryError as portfolio
 
     # Log price history for all tracked coins
     print(f"  📜  Logging price history...")
@@ -494,13 +527,9 @@ def run_scan_cycle(
 
     # Scanner
     top10, pump_alerts, whale_rides, quality_count, tavily_catalysts = run_smart_scanner(exchange=exchange, fear_greed=fg, open_count=_open_count)
-    if not top10:
-        print("  No results from scanner — skipping analysis.")
-        print_scan_summary(top10=[], whale_rides=[], fear_greed=fg)
-        print_track_record()
-        return
 
-    # Log whale ride candidates + send immediate Telegram alert for each
+    # Log whale ride candidates — must happen BEFORE early-return so rides are
+    # recorded even when top10 is empty (e.g. all OHLCV failed this cycle).
     if whale_rides:
         from src.utils.logger import log_whale_ride
         from src.utils.telegram import send_telegram as _send_tg
@@ -542,6 +571,12 @@ def run_scan_cycle(
                 _send_tg(_tg_msg)
             except Exception as _te:
                 print(f"  ⚠️  Whale ride Telegram failed for {_sym}: {_te}")
+
+    if not top10:
+        print("  No results from scanner — skipping analysis.")
+        print_scan_summary(top10=[], whale_rides=whale_rides, fear_greed=fg)
+        print_track_record()
+        return
 
     # News for all top 10 — Tavily AI (if key set) or Google News RSS fallback.
     # fetch_news_for_coins is also called inside analyze_with_groq; this result
@@ -640,8 +675,8 @@ def run_scan_cycle(
     if not new_candidates:
         print(f"\n  ⚠️  NO NEW PICKS — all top10 coins are already OPEN positions.")
         skip_groq = True
-    elif quality_count_new < 1:
-        print(f"\n  ℹ️  No coins score ≥2 pts — passing top candidates to Groq for evaluation.")
+    elif quality_count_new < 3:
+        print(f"\n  ℹ️  Few coins score ≥2 ({quality_count_new}) — passing all candidates to Groq for evaluation.")
 
     groq_candidates: list[dict] = []   # coins that passed Groq pre-filter — logged to CSV
     _groq_failed = False               # True = rate limit / network error, not "no picks"
@@ -691,7 +726,7 @@ def run_scan_cycle(
                 })
 
     # Log only coins that passed Groq pre-filter — never log pre-filter rejects (e.g. ABOVE_UPPER BB).
-    if not skip_groq and quality_count_new >= 1 and groq_candidates:
+    if not skip_groq and new_candidates and groq_candidates:
         log_scanner_results(groq_candidates, fg.get("value", 0))
 
     # Filter recs to only symbols that actually went through the Groq pre-filter.
@@ -706,7 +741,15 @@ def run_scan_cycle(
     for rec in recs:
         rec_sym = rec.get("coin", "").upper()
         _rank   = rec.get("rank") or (recs.index(rec) + 1)
+        # Apply to both scanner and whale_rider positions (Bug fix: Problem 3)
         update_groq_rank(
+            rec_sym,
+            groq_rank  = int(_rank),
+            qualifier  = rec.get("qualifier", "BASE_SCORE"),
+            key_signal = rec.get("key_signal") or (rec.get("reasoning") or "")[:80],
+        )
+        from src.utils.logger import update_whale_rank
+        update_whale_rank(
             rec_sym,
             groq_rank  = int(_rank),
             qualifier  = rec.get("qualifier", "BASE_SCORE"),
@@ -876,9 +919,9 @@ def run_scan_cycle(
                 )
             slot += 1
 
-        # Pad remaining slots up to 3 with best open positions (HOLD)
+        # Pad remaining slots up to 10 with best open positions (HOLD)
         for row in hold_candidates:
-            if slot > 3:
+            if slot > 10:
                 break
             coin    = row.get("coin", "?")
             pnl     = row.get("pnl_pct", "?")
@@ -1035,7 +1078,7 @@ def run_scan_cycle(
                     odds_s   = f"{prob_p*100:.0f}%" if prob_p is not None else "?"
                     edge_v   = pp.get("edge_pct")
                     edge_s   = f" edge +{float(edge_v):.0f}pp" if edge_v else ""
-                    msg     += f"\n{i}. {v} on \"{q}\" @ {odds_s}{edge_s} — bet €100"
+                    msg     += f"\n{i}. {v} on \"{q}\" @ {odds_s}{edge_s} — bet $100"
 
         send_telegram(msg)
 
