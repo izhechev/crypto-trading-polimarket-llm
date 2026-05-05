@@ -13,6 +13,7 @@ from src.connectors.coinpaprika import (
     fetch_tickers_for_scanner as _cp_fetch_tickers,
     fetch_ohlcv as _cp_fetch_ohlcv,
     _build_cg_id_map as _cp_build_cg_id_map,
+    get_ath_date_map as _cp_get_ath_date_map,
 )
 from src.agents.technical_analyst import compute_ta
 
@@ -265,6 +266,9 @@ PERMANENTLY_EXCLUDED = {
     "RIVER",    # permanently excluded
     "KOGE",     # permanently excluded
     "CRCLON",   # permanently excluded
+    "RLC",      # delisted RLC/BTC on Binance Mar 2026, KuCoin margin ended Jan 2026
+    "KNC",      # post-pump exhaustion, no organic protocol demand
+    "ORDI",     # high BTC correlation + amplified downside, bearish 70% sentiment
 }
 
 # Rug pull / scam detection is now fully automatic via coin_risk_assessor.py
@@ -1693,6 +1697,8 @@ def run_smart_scanner(
         print(f"  CG ID map loaded ({len(_cg_id_cache)} symbols)")
     except Exception as _cg_map_e:
         print(f"  CG ID map failed ({_cg_map_e}) — using static map only")
+
+    _ath_date_cache = _cp_get_ath_date_map()
         _cg_id_cache = {}
 
     # 6b. Fetch OHLCV + compute TA for each candidate
@@ -1760,6 +1766,21 @@ def run_smart_scanner(
             # ── Pre-filter Step 0: directional & momentum gates ──────────
             change_24h_raw = coin.get("price_change_percentage_24h") or 0
             momentum_stall = False
+
+            # Gate: POST-TGE DUMP — ATH set within 45 days + 25%+ below ATH + still falling
+            # Catches airdrop/listing dumps where sell pressure is mechanical, not structural.
+            _ath_date_str = _ath_date_cache.get(symbol, "")
+            if _ath_date_str:
+                try:
+                    from datetime import datetime as _dt_ath
+                    _ath_dt = _dt_ath.strptime(_ath_date_str, "%Y-%m-%d")
+                    _days_since_ath = (_dt_ath.utcnow() - _ath_dt).days
+                    if _days_since_ath <= 45 and ath_pct < -25 and change_7d < -5:
+                        print(f"  ❌ SKIP {symbol}: POST-TGE DUMP — ATH {_days_since_ath}d ago, "
+                              f"{ath_pct:.0f}% from ATH, 7d {change_7d:+.1f}%")
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
             # Gate: LOSS < 48h ago → re-entry cooldown
             if prev_closed:

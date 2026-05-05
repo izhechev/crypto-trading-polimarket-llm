@@ -27,6 +27,10 @@ _cg_id_map: dict[str, str] = {}
 _cg_id_map_ts: float = 0.0
 _CG_ID_MAP_TTL = 86400  # 24 hours
 
+# ATH date map — symbol → ISO date string of all-time high (e.g. "2021-11-10")
+# Populated alongside _cg_id_map from the same CoinGecko /coins/markets fetch
+_ath_date_map: dict[str, str] = {}
+
 # Sliding-window rate limiter — max 10 req/sec
 _rl_window: list[float] = []
 
@@ -422,6 +426,7 @@ def _build_cg_id_map() -> dict[str, str]:
         return _cg_id_map
     merged: dict[str, str] = {}
     try:
+        ath_dates: dict[str, str] = {}
         for page in (2, 1):  # fetch page 2 first so page 1 (higher mcap) wins on symbol conflict
             with httpx.Client(timeout=20) as client:
                 resp = client.get(
@@ -434,12 +439,20 @@ def _build_cg_id_map() -> dict[str, str]:
                     sym = (c.get("symbol") or "").upper()
                     if sym:
                         merged[sym] = c["id"]
+                        if c.get("ath_date"):
+                            ath_dates[sym] = c["ath_date"][:10]  # "2021-11-10T..."→ "2021-11-10"
+        _ath_date_map.update(ath_dates)
     except Exception:
         pass
     merged.update(SYMBOL_TO_CG_ID)  # static curated map wins over dynamic
     _cg_id_map = merged
     _cg_id_map_ts = time.time()
     return _cg_id_map
+
+
+def get_ath_date_map() -> dict[str, str]:
+    """Return symbol → ATH date (ISO date string). Populated by _build_cg_id_map."""
+    return _ath_date_map
 
 
 def fetch_tickers_for_scanner(limit: int = 3000) -> list[dict]:
