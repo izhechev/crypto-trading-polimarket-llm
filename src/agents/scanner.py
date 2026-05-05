@@ -1697,9 +1697,9 @@ def run_smart_scanner(
         print(f"  CG ID map loaded ({len(_cg_id_cache)} symbols)")
     except Exception as _cg_map_e:
         print(f"  CG ID map failed ({_cg_map_e}) — using static map only")
+        _cg_id_cache = {}
 
     _ath_date_cache = _cp_get_ath_date_map()
-        _cg_id_cache = {}
 
     # 6b. Fetch OHLCV + compute TA for each candidate
     print(f"\n  Computing TA for {len(candidates)} candidates (top250 by pre-filter score)...")
