@@ -1039,43 +1039,36 @@ def update_open_positions() -> None:
     except Exception:
         _EUR = 0.92
 
-    # Build symbol→CG-ID translation so CP-format coin_ids work with CoinGecko.
-    # Most open positions were recorded with CoinPaprika IDs (e.g. "op-optimism")
-    # which CoinGecko silently ignores. We translate via SYMBOL_TO_CG_ID first.
+    # CoinGecko-only price fetch. CP-format coin_ids are translated to CG IDs via
+    # the static SYMBOL_TO_CG_ID map; unknowns are auto-resolved via CG /search.
     import httpx as _httpx
     from src.connectors.coingecko import _headers as _cg_headers
-    from src.connectors.coinpaprika import SYMBOL_TO_CG_ID as _SYM_TO_CG
+    from src.connectors.coinpaprika import resolve_cg_id as _resolve_cg_id
 
-    # _cid_to_cg: stored coin_id → CG ID to query (may differ for CP-format IDs)
+    # Build stored coin_id → CG ID map
     _cid_to_cg: dict[str, str] = {}
     for _row in scanner_open:
         _cid = _row.get("coin_id", "")
         _sym = _row.get("coin", "").upper()
         if not _cid:
             continue
-        # CG IDs are lowercase with hyphens; CP IDs follow "{ticker}-{name}" pattern.
-        # Heuristic: if the first hyphen-segment matches the ticker, it's a CP ID.
         _first_seg = _cid.split("-")[0].upper() if "-" in _cid else ""
         _is_cp = bool(_first_seg and _first_seg == _sym)
         if _is_cp:
-            _cg_id = _SYM_TO_CG.get(_sym)
-            _cid_to_cg[_cid] = _cg_id if _cg_id else _cid  # fallback: keep as-is
+            _cg_id = _resolve_cg_id(_sym) or _cid
+            _cid_to_cg[_cid] = _cg_id
         else:
-            _cid_to_cg[_cid] = _cid  # already CG format
+            _cid_to_cg[_cid] = _cid
 
-    # Reverse map: CG ID → all stored coin_ids that use it
     _cg_to_cids: dict[str, list[str]] = {}
     for _cid, _cgid in _cid_to_cg.items():
         _cg_to_cids.setdefault(_cgid, []).append(_cid)
 
-    _cg_ids_to_fetch = list(_cg_to_cids.keys())
-
-    # Tier 1: CoinGecko /simple/price — fast, single attempt, CG-translated IDs.
-    # Avoids the 4-retry blocking of /coins/markets when CG is rate-limited.
+    # Batch fetch all known CG IDs
     try:
         _cg_resp = _httpx.get(
             "https://pro-api.coingecko.com/api/v3/simple/price",
-            params={"ids": ",".join(_cg_ids_to_fetch), "vs_currencies": "usd"},
+            params={"ids": ",".join(_cg_to_cids.keys()), "vs_currencies": "usd"},
             headers=_cg_headers(),
             timeout=15,
         )
@@ -1091,158 +1084,33 @@ def update_open_positions() -> None:
     except Exception as _e1:
         print(f"  [tracking] CG price fetch failed: {_e1}")
 
-    # Tier 2: Binance public ticker — always fetched for cross-validation + fallback.
-    # If CG and Binance disagree by >10%, Binance wins (more real-time).
-    try:
-        _bn_resp = _httpx.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            timeout=15,
-        )
-        if _bn_resp.status_code == 200:
-            _bn_sym: dict[str, float] = {}
-            for _tk in _bn_resp.json():
-                _s = _tk.get("symbol", "")
-                if _s.endswith("USDT"):
-                    _base = _s[:-4]
-                    try:
-                        _bn_sym[_base] = float(_tk["price"])
-                    except (ValueError, TypeError):
-                        pass
-            _bn_found: list[str] = []
-            for _row in scanner_open:
-                _cid = _row.get("coin_id", "")
-                _sym = _row.get("coin", "").upper()
-                _bn_p = _bn_sym.get(_sym)
-                if not _bn_p or _bn_p <= 0:
-                    continue
-                if _cid in usd_map:
-                    # Cross-validate: flag + override if >10% divergence
-                    _cg_p = usd_map[_cid]
-                    _diff = abs(_bn_p - _cg_p) / _cg_p if _cg_p else 0
-                    if _diff > 0.10:
-                        print(f"  ⚠️  {_sym} price mismatch: CG={_pfmt(_cg_p)} vs Binance={_pfmt(_bn_p)} ({_diff*100:.1f}%) — using Binance")
-                        usd_map[_cid] = _bn_p
-                        eur_map[_cid] = _bn_p * _EUR
-                else:
-                    usd_map[_cid] = _bn_p
-                    eur_map[_cid] = _bn_p * _EUR
-                    _bn_found.append(_cid)
-            if _bn_found:
-                _syms_bn = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _bn_found]
-                print(f"  Binance resolved: {', '.join(_syms_bn)}")
-        else:
-            print(f"  [tracking] Binance HTTP {_bn_resp.status_code}")
-    except Exception as _e2:
-        print(f"  [tracking] Binance fetch failed: {_e2}")
-
-    # Tier 3: KuCoin all-tickers — covers long-tail and meme coins not on Binance.
-    _missing = [cid for cid in coin_ids if cid not in usd_map]
-    if _missing:
-        try:
-            _kc_resp = _httpx.get(
-                "https://api.kucoin.com/api/v1/market/allTickers",
-                timeout=20,
-            )
-            if _kc_resp.status_code == 200:
-                _kc_sym: dict[str, float] = {}
-                for _tk in _kc_resp.json().get("data", {}).get("ticker", []):
-                    _s = _tk.get("symbol", "")
-                    if _s.endswith("-USDT"):
-                        try:
-                            _p = float(_tk.get("last") or 0)
-                            if _p > 0:
-                                _kc_sym[_s[:-5]] = _p
-                        except (ValueError, TypeError):
-                            pass
-                _kc_found: list[str] = []
-                for _row in scanner_open:
-                    _cid = _row.get("coin_id", "")
-                    if _cid in usd_map:
-                        continue
-                    _sym = _row.get("coin", "").upper()
-                    _p   = _kc_sym.get(_sym)
-                    if _p and _p > 0:
-                        usd_map[_cid] = _p
-                        eur_map[_cid] = _p * _EUR
-                        _kc_found.append(_cid)
-                if _kc_found:
-                    _syms_kc = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _kc_found]
-                    print(f"  KuCoin resolved: {', '.join(_syms_kc)}")
-            else:
-                print(f"  [tracking] KuCoin HTTP {_kc_resp.status_code}")
-        except Exception as _e3:
-            pass  # KuCoin might be unavailable — silently skip
-
-    # Tier 4: Gate.io — covers very small-cap / new coins not on Binance or KuCoin.
-    _missing = [cid for cid in coin_ids if cid not in usd_map]
-    if _missing:
-        try:
-            _gt_resp = _httpx.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=20)
-            if _gt_resp.status_code == 200:
-                _gt_sym: dict[str, float] = {}
-                for _tk in _gt_resp.json():
-                    _s = _tk.get("currency_pair", "")
-                    if _s.endswith("_USDT"):
-                        try:
-                            _p = float(_tk.get("last") or 0)
-                            if _p > 0:
-                                _gt_sym[_s[:-5]] = _p
-                        except (ValueError, TypeError):
-                            pass
-                _gt_found: list[str] = []
-                for _row in scanner_open:
-                    _cid = _row.get("coin_id", "")
-                    if _cid in usd_map:
-                        continue
-                    _sym = _row.get("coin", "").upper()
-                    _p   = _gt_sym.get(_sym)
-                    if _p and _p > 0:
-                        usd_map[_cid] = _p
-                        eur_map[_cid] = _p * _EUR
-                        _gt_found.append(_cid)
-                if _gt_found:
-                    _syms_gt = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _gt_found]
-                    print(f"  Gate.io resolved: {', '.join(_syms_gt)}")
-            else:
-                print(f"  [tracking] Gate.io HTTP {_gt_resp.status_code}")
-        except Exception as _e4:
-            pass
-
-    # Tier 5: CoinCap bulk assets — free fallback (may fail on some networks).
-    _missing = [cid for cid in coin_ids if cid not in usd_map]
-    if _missing:
-        try:
-            _cc_resp = _httpx.get(
-                "https://api.coincap.io/v2/assets",
-                params={"limit": 2000},
-                timeout=20,
-            )
-            if _cc_resp.status_code == 200:
-                _cc_sym: dict[str, float] = {}
-                for _a in _cc_resp.json().get("data", []):
-                    _sym = (_a.get("symbol") or "").upper()
-                    _p   = _a.get("priceUsd")
-                    if _sym and _p:
-                        try:
-                            _cc_sym[_sym] = float(_p)
-                        except (ValueError, TypeError):
-                            pass
-                _cc_found: list[str] = []
-                for _row in scanner_open:
-                    _cid = _row.get("coin_id", "")
-                    if _cid in usd_map:
-                        continue
-                    _sym = _row.get("coin", "").upper()
-                    _p   = _cc_sym.get(_sym)
-                    if _p and _p > 0:
-                        usd_map[_cid] = _p
-                        eur_map[_cid] = _p * _EUR
-                        _cc_found.append(_cid)
-                if _cc_found:
-                    _syms_cc = [r.get("coin", "") for r in scanner_open if r.get("coin_id") in _cc_found]
-                    print(f"  CoinCap resolved: {', '.join(_syms_cc)}")
-        except Exception as _e4:
-            pass  # CoinCap might be unavailable (DNS/network) — silently skip
+    # For any still-missing coins, try dynamic CG /search resolution then retry
+    _still_missing = [r for r in scanner_open if r.get("coin_id") not in usd_map and r.get("coin_id")]
+    if _still_missing:
+        _retry_ids: dict[str, list[str]] = {}
+        for _row in _still_missing:
+            _sym = _row.get("coin", "").upper()
+            _cid = _row.get("coin_id", "")
+            _cg_id = _resolve_cg_id(_sym)
+            if _cg_id:
+                _retry_ids.setdefault(_cg_id, []).append(_cid)
+        if _retry_ids:
+            try:
+                _r2 = _httpx.get(
+                    "https://pro-api.coingecko.com/api/v3/simple/price",
+                    params={"ids": ",".join(_retry_ids.keys()), "vs_currencies": "usd"},
+                    headers=_cg_headers(),
+                    timeout=15,
+                )
+                if _r2.status_code == 200:
+                    for _cgid, _data in _r2.json().items():
+                        _usd_p = _data.get("usd")
+                        if _usd_p:
+                            for _cid in _retry_ids.get(_cgid, []):
+                                usd_map[_cid] = float(_usd_p)
+                                eur_map[_cid] = float(_usd_p) * _EUR
+            except Exception:
+                pass
 
     still_missing = [cid for cid in coin_ids if cid not in usd_map]
     if still_missing:

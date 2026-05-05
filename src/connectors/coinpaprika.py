@@ -356,7 +356,65 @@ SYMBOL_TO_CG_ID: dict[str, str] = {
     "BIO":    "bio-protocol",
     # Other
     "PNUT":   "peanut-the-squirrel",
+    # Resolved 2026-05-05 — CP IDs differ from CG IDs for these
+    "ACH":    "alchemy-pay",
+    "CYBER":  "cyberconnect",
+    "SAHARA": "sahara-ai",
+    "KAT":    "katana-network-token",
+    "MERL":   "merlin-chain",
+    "PROS":   "pharos-network",
+    "OPG":    "opengradient",
+    "CATI":   "catizen",
+    "GIGGLE": "giggle-fund",
+    "CHIP":   "chip-2",
+    "BILL":   "billions-network",
+    "M":      "memecore",
+    "DOOD":   "doodles",
+    "ATH":    "aethir",
+    "BERA":   "berachain-bera",
+    "ANIME":  "anime",
+    "B3":     "b3",
+    "MEME":   "memecoin-2",
+    "MORPHO": "morpho",
+    "RAVE":   "ravedao",
+    "USTC":   "terrausd",
 }
+
+# Runtime cache for dynamically resolved CG IDs (symbol → cg_id)
+_dynamic_cg_id_cache: dict[str, str] = {}
+
+
+def resolve_cg_id(symbol: str) -> str | None:
+    """
+    Return the CoinGecko ID for a symbol. Checks static map first, then
+    queries CG /search as a fallback and caches the result for the session.
+    Returns None if not found.
+    """
+    sym = symbol.upper()
+    if sym in SYMBOL_TO_CG_ID:
+        return SYMBOL_TO_CG_ID[sym]
+    if sym in _dynamic_cg_id_cache:
+        return _dynamic_cg_id_cache[sym]
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__file__.replace("\\", "/").rsplit("/", 3)[0]))
+        import config as _cfg
+        resp = httpx.get(
+            "https://pro-api.coingecko.com/api/v3/search",
+            params={"query": sym},
+            headers={"x-cg-pro-api-key": _cfg.COINGECKO_API_KEY},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            hits = [c for c in resp.json().get("coins", []) if c.get("symbol", "").upper() == sym]
+            if hits:
+                best = min(hits, key=lambda x: x.get("market_cap_rank") or 9999)
+                cg_id = best["id"]
+                _dynamic_cg_id_cache[sym] = cg_id
+                return cg_id
+    except Exception:
+        pass
+    return None
 
 
 def fetch_coin_events(symbol: str, limit: int = 3) -> list[dict]:

@@ -116,11 +116,10 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
 
     import httpx as _httpx
     from src.connectors.coingecko import _headers as _cg_headers
-    from src.connectors.coinpaprika import SYMBOL_TO_CG_ID as _SYM_TO_CG
+    from src.connectors.coinpaprika import resolve_cg_id as _resolve_cg_id
 
     result: dict[str, float] = {}
 
-    # Build symbol map from open_rows (coin_id → symbol) for non-CG tiers
     _cid_sym: dict[str, str] = {}
     if open_rows:
         for _r in open_rows:
@@ -129,15 +128,14 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
             if _cid2 and _sym2:
                 _cid_sym[_cid2] = _sym2
 
-    # Translate CP-format coin_ids → CG IDs for tier 1
+    # Translate CP-format coin_ids → CG IDs using static map + dynamic search
     _cid_to_cg: dict[str, str] = {}
     for _cid in coin_ids:
         _sym = _cid_sym.get(_cid, "")
         _first_seg = _cid.split("-")[0].upper() if "-" in _cid else ""
         _is_cp = bool(_first_seg and _first_seg == _sym)
         if _is_cp and _sym:
-            _cg_id = _SYM_TO_CG.get(_sym)
-            _cid_to_cg[_cid] = _cg_id if _cg_id else _cid
+            _cid_to_cg[_cid] = _resolve_cg_id(_sym) or _cid
         else:
             _cid_to_cg[_cid] = _cid
 
@@ -145,7 +143,7 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
     for _cid, _cgid in _cid_to_cg.items():
         _cg_to_cids.setdefault(_cgid, []).append(_cid)
 
-    # Tier 1: CoinGecko /simple/price
+    # CoinGecko /simple/price — single source of truth
     try:
         resp = _httpx.get(
             "https://pro-api.coingecko.com/api/v3/simple/price",
@@ -164,38 +162,32 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
     except Exception as e:
         print(f"  [alerts] CoinGecko price fetch failed: {e}")
 
-    # Binance cross-validation: compare with CG; override if >10% divergence.
-    # Only uses coins we already know the symbol for (from open_rows) to avoid
-    # ticker reassignment risk on delisted coins.
-    if _cid_sym:
-        try:
-            _bn_resp = _httpx.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                timeout=15,
-            )
-            if _bn_resp.status_code == 200:
-                _bn_map: dict[str, float] = {}
-                for _tk in _bn_resp.json():
-                    _s = _tk.get("symbol", "")
-                    if _s.endswith("USDT"):
-                        try:
-                            _bn_map[_s[:-4]] = float(_tk["price"])
-                        except (ValueError, TypeError):
-                            pass
-                for _cid, _sym in _cid_sym.items():
-                    _bn_p = _bn_map.get(_sym)
-                    if not _bn_p:
-                        continue
-                    _cg_p = result.get(_cid)
-                    if _cg_p:
-                        _diff = abs(_bn_p - _cg_p) / _cg_p
-                        if _diff > 0.10:
-                            print(f"  ⚠️  [alerts] {_sym} price mismatch: CG={_pfmt(_cg_p)} Binance={_pfmt(_bn_p)} ({_diff*100:.1f}%) — using Binance")
-                            result[_cid] = _bn_p
-                    elif _cid not in result:
-                        result[_cid] = _bn_p
-        except Exception:
-            pass
+    # Retry missing coins via dynamic CG /search resolution
+    _missing_rows = [r for r in (open_rows or []) if r.get("coin_id") not in result]
+    if _missing_rows:
+        _retry: dict[str, list[str]] = {}
+        for _r in _missing_rows:
+            _sym = _r.get("coin", "").upper()
+            _cid = _r.get("coin_id", "")
+            _cg_id = _resolve_cg_id(_sym)
+            if _cg_id:
+                _retry.setdefault(_cg_id, []).append(_cid)
+        if _retry:
+            try:
+                _r2 = _httpx.get(
+                    "https://pro-api.coingecko.com/api/v3/simple/price",
+                    params={"ids": ",".join(_retry.keys()), "vs_currencies": "usd"},
+                    headers=_cg_headers(),
+                    timeout=15,
+                )
+                if _r2.status_code == 200:
+                    for _cgid, _data in _r2.json().items():
+                        _usd = _data.get("usd")
+                        if _usd:
+                            for _cid in _retry.get(_cgid, []):
+                                result[_cid] = float(_usd)
+            except Exception:
+                pass
     return result
 
 
