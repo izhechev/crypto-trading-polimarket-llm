@@ -1,5 +1,5 @@
 """
-Price alert monitor — runs every 15 minutes, no Groq needed.
+Price alert monitor — runs every 1 hour, no Groq needed.
 
 Whale ride milestones (checked every run):
   +25%   → alert: first milestone hit
@@ -30,15 +30,22 @@ import config
 _ALERT_STATE_PATH = config.DATA_DIR / "alert_state.json"
 _CSV_PATH         = config.DATA_DIR / "recommendations.csv"
 
+def _pfmt(p: float) -> str:
+    if p >= 1:       return f"${p:,.4f}"
+    if p >= 0.01:    return f"${p:.5f}"
+    if p >= 0.0001:  return f"${p:.7f}"
+    return f"${p:.10f}"
+
+
 # Whale ride milestones: pnl threshold → message template
 # No trailing stops — positions hold until TP (+200%) or pnl <= -100%
 _WHALE_MILESTONES = [
-    (200.0, "🌙 {coin} +200% (${price:.4f}) — TP hit! Close position ✅"),
-    (150.0, "🚀 {coin} +150% (${price:.4f}) — on the way to +200%!"),
-    (100.0, "🚀 {coin} +100% (${price:.4f}) — 3× milestone hit!"),
-    ( 50.0, "🚀 {coin}  +50% (${price:.4f}) — 2× milestone hit!"),
-    ( 25.0, "🚀 {coin}  +25% (${price:.4f}) — 1× milestone hit! (principal recovered)"),
-    ( 15.0, "🚀 {coin}  +15% (${price:.4f}) — Early milestone hit!"),
+    (200.0, "🌙 {coin} +200% ({price}) — TP hit! Close position ✅"),
+    (150.0, "🚀 {coin} +150% ({price}) — on the way to +200%!"),
+    (100.0, "🚀 {coin} +100% ({price}) — 3× milestone hit!"),
+    ( 50.0, "🚀 {coin}  +50% ({price}) — 2× milestone hit!"),
+    ( 25.0, "🚀 {coin}  +25% ({price}) — 1× milestone hit! (principal recovered)"),
+    ( 15.0, "🚀 {coin}  +15% ({price}) — Early milestone hit!"),
 ]
 
 _TP_ALERT_PNL = 8.0    # alert when pnl >= +8%  (2% before TP of +10%)
@@ -157,9 +164,38 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
     except Exception as e:
         print(f"  [alerts] CoinGecko price fetch failed: {e}")
 
-    # CoinGecko key is set — no exchange fallbacks needed.
-    # Symbol-based lookups on Binance/KuCoin/Gate.io are unreliable because
-    # delisted coins get their ticker reassigned to completely different tokens.
+    # Binance cross-validation: compare with CG; override if >10% divergence.
+    # Only uses coins we already know the symbol for (from open_rows) to avoid
+    # ticker reassignment risk on delisted coins.
+    if _cid_sym:
+        try:
+            _bn_resp = _httpx.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                timeout=15,
+            )
+            if _bn_resp.status_code == 200:
+                _bn_map: dict[str, float] = {}
+                for _tk in _bn_resp.json():
+                    _s = _tk.get("symbol", "")
+                    if _s.endswith("USDT"):
+                        try:
+                            _bn_map[_s[:-4]] = float(_tk["price"])
+                        except (ValueError, TypeError):
+                            pass
+                for _cid, _sym in _cid_sym.items():
+                    _bn_p = _bn_map.get(_sym)
+                    if not _bn_p:
+                        continue
+                    _cg_p = result.get(_cid)
+                    if _cg_p:
+                        _diff = abs(_bn_p - _cg_p) / _cg_p
+                        if _diff > 0.10:
+                            print(f"  ⚠️  [alerts] {_sym} price mismatch: CG={_pfmt(_cg_p)} Binance={_pfmt(_bn_p)} ({_diff*100:.1f}%) — using Binance")
+                            result[_cid] = _bn_p
+                    elif _cid not in result:
+                        result[_cid] = _bn_p
+        except Exception:
+            pass
     return result
 
 
@@ -326,7 +362,7 @@ def check_price_alerts() -> None:
             for threshold, msg_tmpl in sorted(_WHALE_MILESTONES, key=lambda x: x[0]):
                 label = f"whale_{threshold:.0f}"
                 if pnl_pct >= threshold and label not in fired:
-                    msg = msg_tmpl.format(coin=coin, price=usd, pnl=pnl_pct)
+                    msg = msg_tmpl.format(coin=coin, price=_pfmt(usd), pnl=pnl_pct)
                     _alert(msg)
                     fired.add(label)
                     dirty_csv = True
