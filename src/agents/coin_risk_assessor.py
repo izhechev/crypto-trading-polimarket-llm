@@ -320,7 +320,7 @@ def assess_coin_risks(
     if not to_assess:
         return results
 
-    print(f"  🔎 Risk-checking {len(to_assess)} coins (cache miss)…")
+    # print(f"  🔎 Risk-checking {len(to_assess)} coins (cache miss)…")
 
     # Step 2 — on-chain flags (all flags used for scoring; serious-only gates news)
     flagged_onchain: dict[str, list[str]] = {}   # full flag set (incl. dilution)

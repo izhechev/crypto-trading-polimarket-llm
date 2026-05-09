@@ -535,7 +535,7 @@ def _process_update(update: dict) -> None:
 
 def _poll_loop() -> None:
     global _offset, _running
-    print("  Telegram bot: polling for commands (/portfolio, /price, /fear, /polymarket, /analyze)")
+    # print("  Telegram bot: polling for commands (/portfolio, /price, /fear, /polymarket, /analyze)")
     while _running:
         try:
             updates = _get_updates(_offset)

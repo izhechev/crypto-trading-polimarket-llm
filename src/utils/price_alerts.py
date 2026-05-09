@@ -60,8 +60,8 @@ def _load_state() -> dict:
         if _ALERT_STATE_PATH.exists():
             with open(_ALERT_STATE_PATH, encoding="utf-8") as f:
                 raw = json.load(f)
-            # Convert lists back to sets
-            return {k: set(v) for k, v in raw.items()}
+            # Lists → sets (milestone keys); floats/other stay as-is (peak price keys)
+            return {k: set(v) if isinstance(v, list) else v for k, v in raw.items()}
     except Exception:
         pass
     return {}
@@ -69,7 +69,8 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     try:
-        serialisable = {k: list(v) for k, v in state.items()}
+        # Sets → lists for JSON; floats (peak prices) and other scalars stay as-is
+        serialisable = {k: list(v) if isinstance(v, set) else v for k, v in state.items()}
         with open(_ALERT_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(serialisable, f, indent=2)
     except Exception:
@@ -191,6 +192,45 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
     return result
 
 
+# ── Failure diagnosis ─────────────────────────────────────────────────────
+
+def _whale_failure_diagnosis(pnl: float, reasoning: str, exit_type: str = "") -> str:
+    """
+    Return a short failure diagnosis for a whale ride that never reached +15%.
+    exit_type: 'sl' | 'expired' | '' (momentum/RSI exit)
+    Returns '' when pnl >= 15 (not a failure).
+    """
+    if pnl >= 15.0:
+        return ""
+    import re as _re_fd
+    stage_m = _re_fd.search(r'\[WHALE_RIDER\]\s+(\w+)', reasoning)
+    ch24_m  = _re_fd.search(r'24h ([+-]?\d+\.?\d*)%', reasoning)
+    vm_m    = _re_fd.search(r'vol/mcap ([\d.]+)x', reasoning)
+    stage   = stage_m.group(1) if stage_m else ""
+    ch24    = float(ch24_m.group(1)) if ch24_m else 0.0
+    vm      = float(vm_m.group(1)) if vm_m else 0.0
+
+    if exit_type == "sl" or pnl <= -14.0:
+        cause = "SL hit — price dumped after entry"
+    elif exit_type == "expired":
+        cause = "24h hold expired — pump never sustained"
+    else:
+        cause = "momentum reversed before reaching +15%"
+
+    notes = []
+    if stage == "PRE":
+        notes.append("PRE-stage (riskier early entry)")
+    if ch24 >= 20:
+        notes.append(f"+{ch24:.0f}% already moved at entry (entered late)")
+    if vm > 0.40:
+        notes.append(f"vol/mcap {vm:.2f}x (sell pressure risk)")
+
+    diag = f"❌ Never hit +15% — {cause}"
+    if notes:
+        diag += f"\n  ℹ️  Signal: {' | '.join(notes)}"
+    return diag
+
+
 # ── Telegram send ─────────────────────────────────────────────────────────
 
 def _alert(msg: str) -> None:
@@ -256,11 +296,11 @@ def check_price_alerts() -> None:
             _is_wr = row.get("type") == "WHALE_RIDE"
             _max_ratio = 4.0 if _is_wr else 2.5
             if _ratio < 0.15 or _ratio > _max_ratio:
-                print(
-                    f"  [alerts] SANITY SKIP {row.get('coin','?')} "
-                    f"fetched=${usd:.6f} vs entry=${_entry_check:.6f} "
-                    f"(ratio {_ratio:.2f}x, max {_max_ratio}x) — likely bad price source"
-                )
+                # print(
+                #     f"  [alerts] SANITY SKIP {row.get('coin','?')} "
+                #     f"fetched=${usd:.6f} vs entry=${_entry_check:.6f} "
+                #     f"(ratio {_ratio:.2f}x, max {_max_ratio}x) — likely bad price source"
+                # )
                 continue
 
         try:
@@ -303,7 +343,9 @@ def check_price_alerts() -> None:
                 if _expired and "time_expired" not in fired and (_is_scam or not is_pr):
                     _exp_status = "WIN" if pnl_pct > 0 else "LOSS"
                     _scam_tag   = " ⚠️ SERIAL SCAM" if _is_scam else ""
-                    _alert(f"⏰ {coin} expired ({_hrs_open:.0f}h/{_max_hold}h) {pnl_pct:+.1f}% → {_exp_status}  ${usd:.4f}{_scam_tag}")
+                    _diag = _whale_failure_diagnosis(pnl_pct, reasoning, exit_type="expired")
+                    _diag_str = f"\n  {_diag}" if _diag else ""
+                    _alert(f"⏰ {coin} expired ({_hrs_open:.0f}h/{_max_hold}h) {pnl_pct:+.1f}% → {_exp_status}  ${usd:.4f}{_scam_tag}{_diag_str}")
                     row["status"]     = _exp_status
                     row["exit_price"] = str(round(usd, 8))
                     row["close_date"] = _now_str_ta
@@ -317,7 +359,9 @@ def check_price_alerts() -> None:
 
             # Pre-milestone: hard SL at -15%
             if not is_pr and pnl_pct <= -15.0 and "pre_sl_fired" not in fired:
-                _alert(f"🛑 {coin} -15% SL at ${usd:.4f} — WHALE_RIDE closed LOSS (pre-milestone)")
+                _diag = _whale_failure_diagnosis(pnl_pct, reasoning, exit_type="sl")
+                _diag_str = f"\n  {_diag}" if _diag else ""
+                _alert(f"🛑 {coin} -15% SL at ${usd:.4f} — WHALE_RIDE closed LOSS (pre-milestone){_diag_str}")
                 row["status"]     = "LOSS"
                 row["exit_price"] = str(round(usd, 8))
                 row["close_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -353,66 +397,107 @@ def check_price_alerts() -> None:
             # Milestone firing LOW→HIGH so +25% fires first and sets PRINCIPAL_RECOVERED
             for threshold, msg_tmpl in sorted(_WHALE_MILESTONES, key=lambda x: x[0]):
                 label = f"whale_{threshold:.0f}"
-                if pnl_pct >= threshold and label not in fired:
-                    msg = msg_tmpl.format(coin=coin, price=_pfmt(usd), pnl=pnl_pct)
-                    _alert(msg)
+                if pnl_pct < threshold or label in fired:
+                    continue
+
+                pct   = int(threshold)
+                score = _SCORES.get(pct, "")
+
+                # CSV-backed deduplication: if a milestone record already exists in the
+                # CSV for this position+threshold, re-sync fired set and skip the alert.
+                # This guards against alert_state.json being reset/corrupted between cycles.
+                _ms_in_csv = any(
+                    r.get("type") == "WHALE_MILESTONE"
+                    and r.get("coin", "").upper() == coin
+                    and r.get("date", "") == row.get("date", "")
+                    and str(r.get("pnl_pct", "")) == str(float(pct))
+                    for r in rows
+                )
+                if _ms_in_csv:
                     fired.add(label)
-                    dirty_csv = True
+                    continue
 
-                    # +25%: recover principal → set hard-floor SL + tag reasoning
-                    if threshold == 25.0 and not is_pr:
-                        row["reasoning"] = (reasoning + " PRINCIPAL_RECOVERED").strip()
-                        row["stop_loss"] = str(entry)
-                        state[_peak_key] = usd
-                        reasoning = row["reasoning"]
-                        is_pr = True
+                msg = msg_tmpl.format(coin=coin, price=_pfmt(usd), pnl=pnl_pct)
+                _alert(msg)
+                fired.add(label)
+                dirty_csv = True
 
-                    pct   = int(threshold)
-                    score = _SCORES.get(pct, "")
-                    flag  = f"[MILESTONE_{pct}]"
-                    if flag not in row.get("reasoning", ""):
-                        row["reasoning"] = (row.get("reasoning", "") + f" {flag}").strip()
+                # +25%: recover principal → set hard-floor SL + tag reasoning
+                if threshold == 25.0 and not is_pr:
+                    row["reasoning"] = (reasoning + " PRINCIPAL_RECOVERED").strip()
+                    row["stop_loss"] = str(entry)
+                    state[_peak_key] = usd
+                    reasoning = row["reasoning"]
+                    is_pr = True
 
-                    # Log WIN record for this milestone
-                    try:
-                        _entry_f  = float(row.get("entry_price") or 0)
-                        _ms_price = round(_entry_f * (1 + pct / 100), 8) if _entry_f > 0 else round(usd, 8)
-                    except (ValueError, TypeError):
-                        _ms_price = round(usd, 8)
-                    _ms = {
-                        "date":          row.get("date", ""),
-                        "type":          "WHALE_MILESTONE",
-                        "coin":          row.get("coin", ""),
-                        "coin_id":       row.get("coin_id", ""),
-                        "entry_price":   row.get("entry_price", ""),
-                        "stop_loss":     "",
-                        "take_profit":   "",
-                        "status":        "WIN",
-                        "exit_price":    _ms_price,
-                        "close_date":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-                        "pnl_pct":       float(pct),
-                        "current_price": round(usd, 8),
-                        "price_eur":     "",
-                        "timeframe":     "",
-                        "fear_greed":    row.get("fear_greed", ""),
-                        "reasoning":     f"[WHALE_MILESTONE +{pct}% / {score}pt] Partial win — position stays open",
-                        "groq_rank":     score,
-                        "qualifier":     "WHALE_RIDE",
-                        "key_signal":    "",
-                    }
-                    _already = any(
-                        r.get("type") == "WHALE_MILESTONE"
-                        and r.get("coin", "").upper() == _ms["coin"].upper()
-                        and r.get("date", "") == _ms["date"]
-                        and str(r.get("pnl_pct", "")) == str(_ms["pnl_pct"])
-                        for r in rows
-                    )
-                    if not _already:
-                        rows.append(_ms)
-                        print(f"  [milestone] {coin} +{pct}% ({score}pt) WIN record logged immediately")
+                flag  = f"[MILESTONE_{pct}]"
+                if flag not in row.get("reasoning", ""):
+                    row["reasoning"] = (row.get("reasoning", "") + f" {flag}").strip()
 
-        # ── Normal scanner picks: PnL-based alerts ───────────────────────
+                # Log WIN record for this milestone
+                try:
+                    _entry_f  = float(row.get("entry_price") or 0)
+                    _ms_price = round(_entry_f * (1 + pct / 100), 8) if _entry_f > 0 else round(usd, 8)
+                except (ValueError, TypeError):
+                    _ms_price = round(usd, 8)
+                _ms = {
+                    "date":          row.get("date", ""),
+                    "type":          "WHALE_MILESTONE",
+                    "coin":          row.get("coin", ""),
+                    "coin_id":       row.get("coin_id", ""),
+                    "entry_price":   row.get("entry_price", ""),
+                    "stop_loss":     "",
+                    "take_profit":   "",
+                    "status":        "WIN",
+                    "exit_price":    _ms_price,
+                    "close_date":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                    "pnl_pct":       float(pct),
+                    "current_price": round(usd, 8),
+                    "price_eur":     "",
+                    "timeframe":     "",
+                    "fear_greed":    row.get("fear_greed", ""),
+                    "reasoning":     f"[WHALE_MILESTONE +{pct}% / {score}pt] Partial win — position stays open",
+                    "groq_rank":     score,
+                    "qualifier":     "WHALE_RIDE",
+                    "key_signal":    "",
+                }
+                rows.append(_ms)
+                print(f"  [milestone] {coin} +{pct}% ({score}pt) WIN record logged immediately")
+
+        # ── Normal scanner picks: hard closes + proximity alerts ────────
         else:
+            _now_str_sc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+            # Hard -10% SL floor — close immediately, don't wait for update_open_positions
+            if pnl_pct <= -10.0 and "scanner_closed" not in fired:
+                # _alert(f"🛑 {coin} -10% SL at ${usd:.4f} — SCANNER closed LOSS ({pnl_pct:+.1f}%)")
+                row["status"]     = "LOSS"
+                row["exit_price"] = str(round(usd, 8))
+                row["close_date"] = _now_str_sc
+                row["pnl_pct"]    = str(round(pnl_pct, 2))
+                fired.add("scanner_closed")
+                dirty_csv = True
+                continue
+
+            # Hard 24h max hold — close unconditionally after 24h
+            try:
+                _entry_dt_sc = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                _hrs_sc = (datetime.now(timezone.utc) - _entry_dt_sc).total_seconds() / 3600
+            except Exception:
+                _hrs_sc = 0.0
+            if _hrs_sc >= 24.0 and "scanner_closed" not in fired:
+                _te_status_sc = "WIN" if pnl_pct > 0 else "LOSS"
+                # _alert(
+                #     f"⏰ {coin} 24h timeout {pnl_pct:+.1f}% → {_te_status_sc}  ${usd:.4f}"
+                # )
+                row["status"]     = _te_status_sc
+                row["exit_price"] = str(round(usd, 8))
+                row["close_date"] = _now_str_sc
+                row["pnl_pct"]    = str(round(pnl_pct, 2))
+                fired.add("scanner_closed")
+                dirty_csv = True
+                continue
+
             # Approaching TP: pnl >= +8%  (2% before TP of +10%)
             if pnl_pct >= _TP_ALERT_PNL and "near_tp" not in fired:
                 _alert(
@@ -506,7 +591,7 @@ def run_alert_loop(interval_minutes: int = 15) -> None:
     Run check_price_alerts() every `interval_minutes` minutes.
     Blocking — call in a background thread or standalone process.
     """
-    print(f"  [alerts] Starting price alert loop (every {interval_minutes}min)...")
+    # print(f"  [alerts] Starting price alert loop (every {interval_minutes}min)...")
     while True:
         try:
             check_price_alerts()

@@ -368,7 +368,7 @@ def _tavily_search(query: str, max_results: int = 3) -> dict:
             )
         if r.status_code == 432:
             _tavily_quota_exceeded = True
-            print("  ⚠️  Tavily quota exceeded — switching to Brave/DuckDuckGo for this session")
+            # print("  ⚠️  Tavily quota exceeded — switching to Brave/DuckDuckGo for this session")
             return {}
         if r.status_code == 200:
             try:
@@ -547,6 +547,9 @@ def _groq_agentic_news(coins: list[dict]) -> dict[str, str]:
         time.sleep(0.2)
 
     print(f"  📰 Got results for {len(raw_results)}/{len(coins)} coins")
+    # Debug: show raw news results
+    for _sym, _content in raw_results.items():
+        print(f"  🔍 News for {_sym}:\n{_content[:200].strip()}...")
 
     if not raw_results:
         return {}

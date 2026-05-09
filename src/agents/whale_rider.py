@@ -48,6 +48,9 @@ _7D_LATE_MIN      = 100.0
 # Tokens that should never be whale ride candidates (confirmed scam/rugged only)
 _BLACKLIST: frozenset[str] = frozenset({
     "FTT",    # FTX collapse token — fully worthless
+    "RLC",    # delisted RLC/BTC on Binance Mar 2026, KuCoin margin ended Jan 2026
+    "KNC",    # post-pump exhaustion, no organic protocol demand
+    "ORDI",   # high BTC correlation + amplified downside
 })
 
 # Shared hard disqualifiers
@@ -63,6 +66,7 @@ _PRE_MIN_MCAP     = 50_000_000  # $50M minimum (2.5x stricter than regular)
 _PRE_COOLDOWN_HOURS = 4         # re-alert PRE stage every 4h (not 24h)
 
 # ── Exit / post-crash thresholds ──────────────────────────────────────────────
+_MAX_HOLD_HOURS   = 24.0   # whale rides are short-term — exit after 24h
 _EXIT_24H_FLOOR   = 5.0    # 24h below this → momentum dying → exit signal
 _EXIT_RSI_CEIL    = 85.0   # RSI above this → overbought → exit signal
 
@@ -252,6 +256,9 @@ def detect_whale_rides(
         if mcap < _MIN_MCAP:
             continue
 
+        if vol < 1_000_000:
+            continue  # fake/zero volume — no real whale action possible
+
         circ_pct = (circ / total * 100) if (total > 0 and circ > 0) else 100.0
         if circ_pct < _MIN_CIRC_PCT:
             continue
@@ -322,20 +329,22 @@ def detect_whale_rides(
 
         vm = vol / max(mcap, 1)
         candidates.append({
-            "symbol":     sym,
-            "name":       coin.get("name", sym),
-            "coin_id":    coin.get("_cg_id") or coin.get("id", ""),
-            "price":      coin.get("current_price", 0),
-            "change_24h": ch24,
-            "change_7d":  ch7d,
-            "vol_mcap":   round(vm, 3),
-            "vol_ratio":  round(vol_ratio, 1),
-            "avg_vol":    round(avg_vol, 0),
-            "mcap":       mcap,
-            "circ_pct":   round(circ_pct, 1),
-            "stage":      stage,
-            "risk_cat":   cat,
-            "cold_start": _cold_start,
+            "symbol":       sym,
+            "name":         coin.get("name", sym),
+            "coin_id":      coin.get("_cg_id") or coin.get("id", ""),
+            "price":        coin.get("current_price", 0),
+            "change_24h":   ch24,
+            "change_7d":    ch7d,
+            "vol_mcap":     round(vm, 3),
+            "vol_ratio":    round(vol_ratio, 1),
+            "vol_usd":      round(vol, 0),
+            "avg_vol_usd":  round(avg_vol, 0),
+            "mcap":         mcap,
+            "circ_pct":     round(circ_pct, 1),
+            "ath_change":   coin.get("ath_change_percentage") or 0,
+            "stage":        stage,
+            "risk_cat":     cat,
+            "cold_start":   _cold_start,
         })
 
     # Update last-seen 24h
@@ -346,9 +355,15 @@ def detect_whale_rides(
     data["last_seen_24h"] = seen_24h
     _save(data)
 
+    def _whale_score(c: dict) -> float:
+        # vol_ratio × vol_mcap: rewards both anomaly strength AND price-impact power.
+        # A coin with 15x multiplier but 0.01 vol/mcap moves less than one with
+        # 3x multiplier and 4x vol/mcap — the latter is the actual whale setup.
+        return c["vol_ratio"] * c["vol_mcap"]
+
     candidates.sort(key=lambda x: (
         {"PRE": 0, "EARLY": 1, "MID": 2}.get(x["stage"], 3),
-        -x["vol_ratio"]
+        -_whale_score(x),
     ))
     return candidates
 
@@ -372,34 +387,128 @@ def send_whale_ride_alerts(
     sent: list[dict] = []
 
     pre_alerts = data.setdefault("pre_alerts", {})
+    fg_value   = (fear_greed or {}).get("value", 50)
 
-    fg_value = (fear_greed or {}).get("value", 50)
-    fg_line  = f"\n⚠️ F&amp;G = {fg_value} (Extreme Fear) — extra caution" if fg_value < 30 else ""
-
-    # Build the top-3 batch message
-    top3 = candidates[:3]
-    lines = []
-    for rank, c in enumerate(top3, 1):
-        sym       = c["symbol"]
-        stage     = c["stage"]
-        price_usd = c["price"]
+    # ── High-Conviction Filter Logic ──────────────────────────────────────────
+    high_conviction = []
+    for c in candidates:
+        mcap      = c["mcap"]
+        vol_mult  = c["vol_ratio"]
+        vol_mcap  = c["vol_mcap"]
         ch24      = c["change_24h"]
-        vol_ratio = c.get("vol_ratio", 0)
-        stage_icon = {"PRE": "🔵", "EARLY": "🟢", "MID": "🟡"}.get(stage, "⚪")
+        ch7d      = c["change_7d"]
+        ath_dist  = c["ath_change"]
+        stage     = c["stage"]
+        sym       = c["symbol"]
+
+        # 1. HARD FILTERS
+        if mcap > 400_000_000: continue
+        
+        # Vol multiplier filter
+        vol_threshold = 2.0 if mcap < 30_000_000 else 3.0
+        if vol_mult < vol_threshold: continue
+        
+        if vol_mcap > 0.60: continue
+        if not (5.0 <= ch24 <= 30.0): continue
+        if ath_dist > -20.0: continue
+        
+        # Stage filter: EARLY preferred, MID only if 7d > 100%
+        if stage not in ("EARLY", "MID"): continue
+        if stage == "MID" and ch7d <= 100.0: continue
+
+        # 2. BONUS SCORE
+        score = 0
+        if mcap < 50_000_000: score += 2
+        if ch7d > 25.0:       score += 2
+        if vol_mult > 5.0:    score += 1
+        if ath_dist < -80.0:  score += 1
+        if 0.10 <= vol_mcap <= 0.35: score += 1
+        
+        # Persistence check (2+ times in 48h)
+        sym_data = active.get(sym, {})
+        hits = sym_data.get("hits", [])
+        if len([h for h in hits if now_ts - h <= 48 * 3600]) >= 2:
+            score += 1
+        
+        if score >= 3:
+            c["hc_score"] = score
+            high_conviction.append(c)
+
+    high_conviction.sort(key=lambda x: -x["hc_score"])
+    
+    hc_lines = []
+    for c in high_conviction:
+        hc_lines.append(
+            f"  {c['symbol']:6} | {_fmt_mcap(c['mcap']):>5} | {c['vol_ratio']:>4.1f}x | {c['vol_mcap']:>4.2f}x | "
+            f"{c['change_24h']:>+5.1f}% | {c['change_7d']:>+5.1f}% | {c['ath_change']:>4.0f}% | {c['hc_score']}/8"
+        )
+    
+    hc_msg = ""
+    if hc_lines:
+        hc_msg = "🔥 <b>HIGH-CONVICTION WHALE SIGNALS</b>\n" + \
+                 "<pre>TICKER | mcap  | volM | v/mc | 24h%  | 7d%   | ATH% | score</pre>\n" + \
+                 "\n".join(hc_lines) + "\n\n"
+    elif candidates:
+        hc_msg = "❌ No high-conviction signals this round.\n\n"
+
+    # ── Original Batch Logic ──────────────────────────────────────────────────
+    # Count total open positions — cap auto-opens at 50 total (Normal market)
+    _open_count = 0
+    try:
+        from src.utils.logger import _read as _log_read
+        _open_count = sum(1 for r in _log_read() if r.get("status") == "OPEN")
+    except Exception:
+        pass
+
+    is_neutral = fg_value >= 40
+    _MAX_TOTAL_POSITIONS = 50 if is_neutral else 30
+    _MAX_WHALE_AUTO      = 20 if is_neutral else 10
+    _auto_opened         = 0
+    fg_line  = f"\n⚠️ F&amp;G = {fg_value} ({'Neutral' if is_neutral else 'Fear'}) — {'Aggressive' if is_neutral else 'Conservative'} mode"
+
+    top10 = candidates[:10]
+    lines = []
+    for rank, c in enumerate(top10, 1):
+        sym         = c["symbol"]
+        name        = c.get("name", sym)
+        stage       = c["stage"]
+        price_usd   = c["price"]
+        ch24        = c["change_24h"]
+        ch7d        = c.get("change_7d", 0)
+        vol_ratio   = c.get("vol_ratio", 0)
+        vol_mcap    = c.get("vol_mcap", 0)
+        vol_usd     = c.get("vol_usd", 0)
+        avg_vol_usd = c.get("avg_vol_usd", 0)
+        mcap        = c.get("mcap", 0)
+        circ_pct    = c.get("circ_pct", 100)
+        ath_chg     = c.get("ath_change", 0)
+        cold        = " ❄️" if c.get("cold_start") else ""
+        stage_icon  = {"PRE": "🔵", "EARLY": "🟢", "MID": "🟡"}.get(stage, "⚪")
+        mcap_str    = _fmt_mcap(mcap) if mcap else "?"
+        vol_str     = _fmt_mcap(vol_usd) if vol_usd else "?"
+        avg_str     = _fmt_mcap(avg_vol_usd) if avg_vol_usd else "?"
+        ath_str     = f"{ath_chg:+.0f}% from ATH" if ath_chg else ""
+        circ_str    = f"circ {circ_pct:.0f}%" if circ_pct < 100 else ""
+        extra       = "  |  ".join(x for x in (ath_str, circ_str) if x)
+        _coin_id = c.get("coin_id", "")
+        _link    = f' <a href="https://www.coingecko.com/en/coins/{_coin_id}">CG</a>' if _coin_id else ""
         lines.append(
-            f"  #{rank} <b>{sym}</b> {stage_icon} {stage}  "
-            f"{_fmt_price(price_usd)}  {ch24:+.1f}%  vol {vol_ratio:.0f}x"
+            f"  #{rank} <b>{sym}</b> ({name}) {stage_icon} {stage}{cold}{_link}\n"
+            f"     {_fmt_price(price_usd)}  24h {ch24:+.1f}%  7d {ch7d:+.0f}%\n"
+            f"     vol {vol_str} ({vol_ratio:.1f}x avg {avg_str})  vol/mcap {vol_mcap:.2f}x\n"
+            f"     mcap {mcap_str}" + (f"  |  {extra}" if extra else "")
         )
 
-    if lines:
+    if lines or hc_msg:
         batch_msg = (
-            f"🐋 <b>WHALE RIDE DETECTED — TOP {len(top3)}</b>{fg_line}\n\n"
-            + "\n".join(lines)
+            hc_msg +
+            f"🐋 <b>WHALE RIDE DETECTED — TOP {len(top10)}</b>{fg_line}\n\n"
+            + "\n\n".join(lines)
             + "\n\n  ⚠️ Manual trade only — invest $100 max per signal"
         )
         try:
             send_telegram(batch_msg)
-            print(f"  🐋 WHALE RIDE batch sent: {', '.join(c['symbol'] for c in top3)}")
+            # print(f"  🐋 WHALE RIDE batch sent: {', '.join(c['symbol'] for c in top10)}")
         except Exception as e:
             print(f"  ⚠️  Whale ride batch alert failed: {e}")
 
@@ -415,11 +524,33 @@ def send_whale_ride_alerts(
             pre_alerts[sym] = {"ts": now_ts, "price": price_usd}
             continue
 
-        prev = active.get(sym)
-        prev_age_h = (now_ts - prev.get("alert_ts", 0)) / 3600 if prev else 999
-        is_new = prev is None or prev_age_h >= _DUPLICATE_HOURS
+        sym_data = active.setdefault(sym, {})
+        hits = sym_data.setdefault("hits", [])
+        hits.append(now_ts)
+        # Keep only last 48h
+        sym_data["hits"] = [h for h in hits if now_ts - h <= 48 * 3600]
 
-        active[sym] = {
+        prev_age_h = (now_ts - sym_data.get("alert_ts", 0)) / 3600
+        is_new = sym_data.get("alert_ts") is None or prev_age_h >= _DUPLICATE_HOURS
+
+        # Bug fix: if alerted but failed to open in CSV (due to prior bug),
+        # force a retry even if not "new" by age.
+        _already_open = False
+        try:
+            from src.utils.logger import _read as _log_read
+            _already_open = any(
+                r.get("coin", "").upper() == sym.upper()
+                and r.get("status") == "OPEN"
+                and r.get("type") == "WHALE_RIDE"
+                for r in _log_read()
+            )
+        except Exception:
+            pass
+
+        if not _already_open:
+            is_new = True  # force retry if not yet in CSV
+
+        sym_data.update({
             "alert_ts":        now_ts,
             "alert_time":      now_iso,
             "alert_price":     price_usd,
@@ -427,14 +558,23 @@ def send_whale_ride_alerts(
             "stage":           stage,
             "ch7d_at_alert":   ch7d,
             "ch24_at_alert":   ch24,
-        }
+        })
+        
         if is_new:
             sent.append(c)
             _whale_entry_alerts_sent.add(sym)
+            # Auto-open position: top 3 EARLY only, skip if too many open
+            _should_open = (
+                stage == "EARLY"
+                and _auto_opened < _MAX_WHALE_AUTO
+                and _open_count < _MAX_TOTAL_POSITIONS
+            )
             try:
                 from src.utils.logger import log_whale_rider_alert
-                fg_val = (fear_greed or {}).get("value", 50)
-                log_whale_rider_alert(c, fg_val)
+                _was_logged = log_whale_rider_alert(c, fg_value, open_position=_should_open)
+                if _should_open and _was_logged:
+                    _auto_opened += 1
+                    _open_count   += 1
             except Exception:
                 pass
 
@@ -473,10 +613,6 @@ def check_exit_signals(
         if not coin:
             continue
 
-        # Only send exit alerts for coins that had an entry alert in this session.
-        if sym not in _whale_entry_alerts_sent:
-            continue
-
         # Enforce minimum hold before exit can fire — prevents same-scan exits
         # caused by data source mismatch between detection and exit check feeds.
         alert_ts = alert.get("alert_ts", 0)
@@ -490,7 +626,11 @@ def check_exit_signals(
         stage       = alert.get("stage", "?")
 
         exit_reason: str | None = None
-        if ch24 < _EXIT_24H_FLOOR:
+        age_h = (now_ts - alert_ts) / 3600
+
+        if age_h > _MAX_HOLD_HOURS:
+            exit_reason = f"Max hold reached ({age_h:.0f}h &gt; {_MAX_HOLD_HOURS:.0f}h)"
+        elif ch24 < _EXIT_24H_FLOOR:
             exit_reason = f"24h momentum slowing ({ch24:+.1f}% &lt; +{_EXIT_24H_FLOOR:.0f}%)"
         elif rsi is not None and rsi > _EXIT_RSI_CEIL:
             exit_reason = f"RSI {rsi:.1f} &gt; {_EXIT_RSI_CEIL:.0f} (overbought)"
@@ -498,16 +638,40 @@ def check_exit_signals(
         if not exit_reason:
             continue
 
-        pnl_str = ""
-        if alert_price > 0 and current > 0:
-            pnl_pct = (current - alert_price) / alert_price * 100
-            pnl_str = f" ({pnl_pct:+.1f}% from alert price)"
+        pnl_pct = (current - alert_price) / alert_price * 100 if alert_price > 0 and current > 0 else 0.0
+        pnl_str = f" ({pnl_pct:+.1f}% from alert price)" if alert_price > 0 and current > 0 else ""
 
+        # Failure diagnosis when position never reached +15%
+        failure_note = ""
+        if pnl_pct < 15.0:
+            _ch24_entry = alert.get("ch24_at_alert", 0)
+            _fail_notes = []
+            if stage == "PRE":
+                _fail_notes.append("PRE-stage (riskier early entry)")
+            if _ch24_entry >= 20:
+                _fail_notes.append(f"+{_ch24_entry:.0f}% already moved at entry")
+            _plain_exit = exit_reason.replace("&lt;", "<").replace("&gt;", ">")
+            if "momentum" in _plain_exit.lower():
+                _cause = "momentum reversed"
+            elif "Max hold" in _plain_exit:
+                _cause = "24h hold expired"
+            elif "RSI" in _plain_exit:
+                _cause = "RSI overbought exit"
+            else:
+                _cause = "pump stalled"
+            failure_note = (
+                f"\n\n  ❌ <b>Never reached +15%</b> — {_cause}"
+                + (f"\n  ℹ️  Signal at entry: {' | '.join(_fail_notes)}" if _fail_notes else "")
+            )
+
+        _cid_exit = alert.get("coin_id", "")
+        _link_exit = f'\n  🔗 <a href="https://www.coingecko.com/en/coins/{_cid_exit}">CoinGecko</a>' if _cid_exit else ""
         msg = (
             f"🐋 <b>WHALE EXIT SIGNAL — {sym}</b>\n\n"
             f"  Current:   {_fmt_price(current)}{pnl_str}\n"
             f"  Signal:    {exit_reason}\n"
-            f"  Stage was: {stage}\n\n"
+            f"  Stage was: {stage}{_link_exit}"
+            f"{failure_note}\n\n"
             f"  💬 Consider taking profit <b>NOW</b>.\n"
             f"  This is not automatic — your decision."
         )
@@ -711,14 +875,15 @@ def display_late_stage(coins: list[dict]) -> None:
             }
 
     if late:
-        print(f"\n  ⏳  LATE STAGE PUMPS (>+{_7D_LATE_MIN:.0f}% 7d — watchlist only)\n" + "-" * 60)
+        # print(f"\n  ⏳  LATE STAGE PUMPS (>+{_7D_LATE_MIN:.0f}% 7d — watchlist only)\n" + "-" * 60)
         for c in late:
             sym   = c.get("symbol", "?")
             ch7d  = c.get("price_change_percentage_7d_in_currency") or 0
             price = c.get("current_price", 0)
             mcap  = (c.get("market_cap") or 0) / 1e6
-            print(f"  ⏳ {sym:8s} {_fmt_price(price)}  7d: {ch7d:+.0f}%  MCap: ${mcap:.0f}M"
-                  f"  → Wait for -{_CRASH_DROP_PCT:.0f}% crash then RSI <{_CRASH_RSI_MAX:.0f}")
+            # print(f"  ⏳ {sym:8s} {_fmt_price(price)}  7d: {ch7d:+.0f}%  MCap: ${mcap:.0f}M"
+            #       f"  → Wait for -{_CRASH_DROP_PCT:.0f}% crash then RSI <{_CRASH_RSI_MAX:.0f}")
+            pass
 
     data["late_watchlist"] = watchlist
     _save(data)

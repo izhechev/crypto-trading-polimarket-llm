@@ -237,7 +237,7 @@ def print_daily_summary() -> None:
             f"{tokens_total:>8,} tokens  ${cost:.4f}"
         )
     print(f"  {'─'*50}")
-    print(f"  Total cost today: ${total_cost:.4f}")
+    # print(f"  Total cost today: ${total_cost:.4f}")
 
 
 def get_tavily_monthly_usage() -> dict:

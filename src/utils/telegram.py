@@ -76,7 +76,7 @@ def send_telegram(message: str) -> bool:
         ok = _send_one(config.TELEGRAM_CHAT_ID, chunk) and ok
     if ok:
         n = len(chunks)
-        print(f"  Telegram alert sent ({n} message{'s' if n > 1 else ''})")
+        # print(f"  Telegram alert sent ({n} message{'s' if n > 1 else ''})")
     return ok
 
 

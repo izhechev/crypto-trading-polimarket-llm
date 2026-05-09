@@ -96,8 +96,8 @@ def print_win_analysis(row: dict) -> None:
     except (ValueError, TypeError):
         pass
 
-    print(f"\n  ✅ WIN: {coin} {pnl:+.1f}% ({days_str})")
-    print(f"     WHY IT WORKED:")
+    # print(f"\n  ✅ WIN: {coin} {pnl:+.1f}% ({days_str})")
+    # print(f"     WHY IT WORKED:")
 
     if fg_val is not None:
         zone = (
@@ -106,34 +106,36 @@ def print_win_analysis(row: dict) -> None:
             "neutral market" if fg_val < 60 else
             "greed zone"
         )
-        print(f"     - Entry during F&G={fg_val} ({zone})")
+        # print(f"     - Entry during F&G={fg_val} ({zone})")
 
     if sigs["vol_mcap"] is not None:
         vm = sigs["vol_mcap"]
         lbl = ("strong buying pressure" if vm > 0.5
                else "elevated buying activity" if vm > 0.2
                else "moderate volume")
-        print(f"     - Vol/mcap {vm:.2f}x at entry ({lbl})")
+        # print(f"     - Vol/mcap {vm:.2f}x at entry ({lbl})")
 
     if sigs["macd_bullish"]:
         ctx = ("contrarian — MACD bullish while market was fearful"
                if fg_val is not None and fg_val < 40
                else "momentum confirmed by MACD")
-        print(f"     - {ctx}")
+        # print(f"     - {ctx}")
 
     if sigs["rsi"] is not None:
         r_val = sigs["rsi"]
         lbl   = ("deeply oversold" if r_val < 30
                  else "oversold" if r_val < 40
                  else f"RSI {r_val:.0f}")
-        print(f"     - RSI {r_val:.1f} at entry ({lbl} — bounce setup)")
+        # print(f"     - RSI {r_val:.1f} at entry ({lbl} — bounce setup)")
 
     if sigs["bb_below"]:
-        print(f"     - Price below lower Bollinger Band (mean-reversion setup)")
+        # print(f"     - Price below lower Bollinger Band (mean-reversion setup)")
+        pass
     if sigs["coiled_spring"]:
-        print(f"     - Coiled spring: deep ATH discount + exhausted sellers")
+        # print(f"     - Coiled spring: deep ATH discount + exhausted sellers")
+        pass
 
-    print(f"     - Entered {_pfmt(entry)} → exited {_pfmt(exit_p)}")
+    # print(f"     - Entered {_pfmt(entry)} → exited {_pfmt(exit_p)}")
 
     # Build 1-line lesson from dominant signals
     lessons: list[str] = []
@@ -213,23 +215,23 @@ def print_win_patterns() -> None:
     avg_days = sum(days_list) / len(days_list) if days_list else 0
     avg_pnl  = sum(pnl_list)  / len(pnl_list)  if pnl_list  else 0
 
-    print(f"\n  📊 WIN PATTERNS ({n} win{'s' if n != 1 else ''}):")
+    # print(f"\n  📊 WIN PATTERNS ({n} win{'s' if n != 1 else ''}):")
     # Only surface signals present in ≥40% of wins
-    threshold = max(2, n * 0.40)
-    for key, label in [
-        ("macd_bullish",  "had MACD bullish at entry"),
-        ("fg_fear",       "entered during F&G < 25 (extreme fear)"),
-        ("high_vol",      "had vol/mcap > 0.20x"),
-        ("bb_below",      "were below lower Bollinger Band"),
-        ("coiled_spring", "were coiled spring setups"),
-    ]:
-        c = counts[key]
-        if c >= threshold:
-            pct = c / n * 100
-            print(f"     - {c}/{n} ({pct:.0f}%) {label}")
+    # threshold = max(2, n * 0.40)
+    # for key, label in [
+    #     ("macd_bullish",  "had MACD bullish at entry"),
+    #     ("fg_fear",       "entered during F&G < 25 (extreme fear)"),
+    #     ("high_vol",      "had vol/mcap > 0.20x"),
+    #     ("bb_below",      "were below lower Bollinger Band"),
+    #     ("coiled_spring", "were coiled spring setups"),
+    # ]:
+    #     c = counts[key]
+    #     if c >= threshold:
+    #         pct = c / n * 100
+    #         print(f"     - {c}/{n} ({pct:.0f}%) {label}")
 
-    print(f"     - Avg days to close:  {avg_days:.1f}")
-    print(f"     - Avg P&L per WIN:    {avg_pnl:+.1f}%")
+    # print(f"     - Avg days to close:  {avg_days:.1f}")
+    # print(f"     - Avg P&L per WIN:    {avg_pnl:+.1f}%")
 
     # Best combo: MACD bullish + F&G < 25 — compute win rate from ALL closed trades
     combo_wins = combo_total = 0
@@ -336,24 +338,25 @@ def print_lose_patterns() -> None:
     avg_days = sum(days_list) / len(days_list) if days_list else 0
     avg_pnl  = sum(pnl_list)  / len(pnl_list)  if pnl_list  else 0
 
-    print(f"\n  📉 LOSE PATTERNS ({n} loss{'es' if n != 1 else ''}):")
-    threshold = 1 if n <= 3 else max(2, n * 0.40)
-    for key, label in [
-        ("macd_bearish",  "had NO MACD bullish at entry (weak momentum)"),
-        ("macd_bullish",  "had MACD bullish but still lost (false signal)"),
-        ("fg_greed",      "entered during F&G > 60 (greed zone)"),
-        ("bb_above",      "were above upper Bollinger Band (overbought entry)"),
-        ("rsi_high",      "had RSI > 65 at entry (buying top)"),
-        ("high_vol",      "had high vol/mcap but still lost"),
-        ("fg_fear",       "entered during F&G < 25 (fear didn't save them)"),
-    ]:
-        c = counts[key]
-        if c >= threshold:
-            pct = c / n * 100
-            print(f"     - {c}/{n} ({pct:.0f}%) {label}")
+    # print(f"\n  📉 LOSE PATTERNS ({n} loss{'es' if n != 1 else ''}):")
+    # threshold = 1 if n <= 3 else max(2, n * 0.40)
+    # for key, label in [
+    #     ("macd_bearish",  "had NO MACD bullish at entry (weak momentum)"),
+    #     ("macd_bullish",  "had MACD bullish but still lost (false signal)"),
+    #     ("fg_greed",      "entered during F&G > 60 (greed zone)"),
+    #     ("bb_above",      "were above upper Bollinger Band (overbought entry)"),
+    #     ("rsi_high",      "had RSI > 65 at entry (buying top)"),
+    #     ("high_vol",      "had high vol/mcap but still lost"),
+    #     ("fg_fear",       "entered during F&G < 25 (fear didn't save them)"),
+    # ]:
+    #     c = counts[key]
+    #     if c >= threshold:
+    #         pct = c / n * 100
+    #         print(f"     - {c}/{n} ({pct:.0f}%) {label}")
 
-    print(f"     - Avg days to stop-loss:  {avg_days:.1f}")
-    print(f"     - Avg P&L per LOSS:       {avg_pnl:+.1f}%")
+    # print(f"     - Avg days to stop-loss:  {avg_days:.1f}")
+    # print(f"     - Avg P&L per LOSS:       {avg_pnl:+.1f}%")
+    pass
 
     # Worst combos: check multiple avoid-signal patterns, show any with >= 1 sample
     _avoid_combos = [
@@ -1115,10 +1118,11 @@ def update_open_positions() -> None:
     still_missing = [cid for cid in coin_ids if cid not in usd_map]
     if still_missing:
         syms_missing = [r.get("coin","?") for r in scanner_open if r.get("coin_id") in still_missing]
-        print(f"  ⚠️  Price unavailable — skipping update for: {', '.join(syms_missing)}")
+        # print(f"  ⚠️  Price unavailable — skipping update for: {', '.join(syms_missing)}")
 
     if not usd_map:
-        print("  Warning: could not fetch prices for tracking: all sources failed — time-expiry closes still run")
+        # print("  Warning: could not fetch prices for tracking: all sources failed — time-expiry closes still run")
+        pass
 
     # Fetch F&G once — used for extreme fear auto-close rule
     _fg_value = 50
@@ -1163,6 +1167,30 @@ def update_open_positions() -> None:
                             new_wins.append(row)
                 except Exception:
                     pass
+            # SCANNER fallback: use cached current_price for hard closes when live price unavailable
+            elif row_type in ("SCANNER", ""):
+                try:
+                    _last_sc = float(row.get("current_price") or row.get("entry_price") or 0)
+                    _ent_sc  = float(row.get("entry_price") or 0)
+                    if _last_sc > 0 and _ent_sc > 0:
+                        _pnl_sc  = (_last_sc - _ent_sc) / _ent_sc * 100
+                        _edt_sc  = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                        _hrs_sc  = (datetime.now(timezone.utc) - _edt_sc).total_seconds() / 3600
+                        _reason_sc = None
+                        if _pnl_sc <= -10.0:
+                            _reason_sc = "-10% SL"
+                        elif _hrs_sc >= 24.0:
+                            _reason_sc = f"{_hrs_sc:.0f}h timeout"
+                        if _reason_sc:
+                            _sc_st = "WIN" if _pnl_sc > 0 else "LOSS"
+                            row["status"]     = _sc_st
+                            row["exit_price"] = round(_last_sc, 6)
+                            row["close_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                            row["pnl_pct"]    = round(_pnl_sc, 2)
+                            closed += 1
+                            print(f"  ⏰ SCANNER (cached price) {_reason_sc}: {row['coin']} {_pnl_sc:+.1f}% → {_sc_st}")
+                except Exception:
+                    pass
             continue  # skip price-dependent updates for all other cases
 
         try:
@@ -1188,8 +1216,8 @@ def update_open_positions() -> None:
                 or (_age_hrs < 2 and (ratio > 50 or ratio < 0.02))  # impossible move in <2h
             )
             if _price_collision:
-                print(f"  ⚠️  PRICE COLLISION skipped: {row.get('coin')} "
-                      f"entry=${entry:.6f} fetched=${usd:.6f} (ratio {ratio:.1f}×)")
+                # print(f"  ⚠️  PRICE COLLISION skipped: {row.get('coin')} "
+                #       f"entry=${entry:.6f} fetched=${usd:.6f} (ratio {ratio:.1f}×)")
                 continue
 
         pnl_pct = (usd - entry) / entry * 100
@@ -1282,7 +1310,7 @@ def update_open_positions() -> None:
                 row["close_date"] = _now_str
                 closed += 1
                 new_wins.append(row)
-                print(f"  🌙 WHALE_RIDE TP HIT: {row['coin']} +200% → closed WIN")
+                # print(f"  🌙 WHALE_RIDE TP HIT: {row['coin']} +200% → closed WIN")
             elif sl > 0 and usd <= sl:
                 # Bug 2: honour SL for whale rides
                 row["status"]     = "LOSS"
@@ -1393,8 +1421,8 @@ def update_open_positions() -> None:
             closed += 1
 
     _write(rows)
-    if closed:
-        print(f"  {closed} position(s) closed (WIN/LOSS/TIME EXIT)")
+    # if closed:
+    #     print(f"  {closed} position(s) closed (WIN/LOSS/TIME EXIT)")
     for win_row in new_wins:
         if win_row.get("_milestone_only"):
             _pct = win_row.get("_milestone", 0)
@@ -1581,7 +1609,7 @@ def log_price_history() -> None:
                 "price_usd": round(p.price_usd, 6),
             })
 
-    print(f"  Price history logged ({len(prices)} coins -> {HISTORY_PATH.name})")
+    # print(f"  Price history logged ({len(prices)} coins -> {HISTORY_PATH.name})")
 
 
 def print_daily_activity() -> None:
@@ -1690,6 +1718,48 @@ def print_daily_activity() -> None:
 
     sign = "+" if net_usd >= 0 else ""
     print(f"  Today's net: {sign}${net_usd:.0f}  ($100/position × closed P&L)")
+
+    # Failed whale rides today — positions that closed without ever reaching +15%
+    failed_wr = [
+        r for r in wins_today + losses_today + expired_today
+        if r.get("type") == "WHALE_RIDE"
+        and "PRINCIPAL_RECOVERED" not in r.get("reasoning", "")
+    ]
+    if failed_wr:
+        import re as _re_da
+        print(f"\n  🔍  FAILED WHALE RIDES (never hit +15%)")
+        for r in failed_wr:
+            try:
+                pnl = float(r.get("pnl_pct", 0))
+            except (ValueError, TypeError):
+                pnl = 0.0
+            rsn = r.get("reasoning", "")
+            exit_m = _re_da.search(r'EXIT_SIGNAL:\s*(.+?)(?:\s*\||$)', rsn)
+            exit_sig = exit_m.group(1).strip() if exit_m else ""
+            ch24_m = _re_da.search(r'24h ([+-]?\d+\.?\d*)%', rsn)
+            ch24 = float(ch24_m.group(1)) if ch24_m else 0.0
+            stage_m = _re_da.search(r'\[WHALE_RIDER\]\s+(\w+)', rsn)
+            stage = stage_m.group(1) if stage_m else "?"
+
+            if pnl <= -14.0 or "sl" in exit_sig.lower():
+                cause = "SL hit"
+            elif "expired" in exit_sig.lower() or "Max hold" in exit_sig:
+                cause = "time expired"
+            elif "momentum" in exit_sig.lower():
+                cause = "momentum died"
+            elif "RSI" in exit_sig:
+                cause = "RSI exit"
+            else:
+                cause = exit_sig or "closed"
+
+            notes = []
+            if stage == "PRE":
+                notes.append("PRE")
+            if ch24 >= 20:
+                notes.append(f"+{ch24:.0f}% at entry")
+            notes_str = f" [{', '.join(notes)}]" if notes else ""
+            print(f"  ❌ {r['coin']:8s} {pnl:+.1f}%  {cause}{notes_str}")
+
     print(f"  {'─'*46}")
 
 
@@ -1791,7 +1861,8 @@ def print_scan_summary(
             crash = wr.get("crash_reason", "?")[:55]
             print(f"    {i:2}. {sym:8s}{tier_tag}  TP {_pe(tp)} / SL {_pe(sl)}  — {crash}")
     else:
-        print("    (none this scan)")
+        # print("    (none this scan)")
+        pass
 
     print(f"\n  {'═'*_W}")
 
@@ -1926,7 +1997,8 @@ def print_track_record() -> None:
             f"  now ${total_value_usd:.2f}  ({total_pnl_pct:+.1f}%){no_entry_note}"
         )
     else:
-        print("    No portfolio data yet — run with --scan to populate.")
+        # print("    No portfolio data yet — run with --scan to populate.")
+        pass
 
     # ── 2. WATCHLIST ──────────────────────────────────────────────────────
     # Coins already shown in PORTFOLIO are excluded — portfolio takes priority.
@@ -1960,7 +2032,8 @@ def print_track_record() -> None:
             except (ValueError, KeyError):
                 pass
     else:
-        print("    No watchlist data yet — run with --scan to populate.")
+        # print("    No watchlist data yet — run with --scan to populate.")
+        pass
 
     # ── 3. SCANNER PICKS ─────────────────────────────────────────────────
     scanner_rows = [

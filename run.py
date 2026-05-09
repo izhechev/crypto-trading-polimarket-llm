@@ -422,10 +422,10 @@ def run_scan_cycle(
     from src.utils.enrichment import fetch_enrichment
     from src.utils.telegram import send_telegram
 
-    print(f"\n  🕐  Started at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    # print(f"\n  🕐  Started at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
     # Update any open scanner positions before scanning
-    print(f"  🔄  Updating open positions...")
+    # print(f"  🔄  Updating open positions...")
     update_open_positions()
 
     # ── Portfolio management alerts ───────────────────────────────────────
@@ -461,13 +461,13 @@ def run_scan_cycle(
                 1 for p in _pm_positions if (p.get("pnl_pct") or 0) > 0
             )
             # Console summary
-            if _tp_near or _crit_loss or _stale_pm or _open_count > 0:
-                print(
-                    f"  📊  Portfolio: {_profitable_count} profitable / {_open_count} total open | "
-                    f"TP≥10%: {len(_tp_near)} | "
-                    f"Loss≤-10%: {len(_crit_loss)} | "
-                    f"Stale: {len(_stale_pm)}"
-                )
+            # if _tp_near or _crit_loss or _stale_pm or _open_count > 0:
+            #     print(
+            #         f"  📊  Portfolio: {_profitable_count} profitable / {_open_count} total open | "
+            #         f"TP≥10%: {len(_tp_near)} | "
+            #         f"Loss≤-10%: {len(_crit_loss)} | "
+            #         f"Stale: {len(_stale_pm)}"
+            #     )
             # Telegram alerts
             _pm_msgs: list[str] = []
             for _p in _tp_near:
@@ -515,7 +515,7 @@ def run_scan_cycle(
     # log_watchlist_prices()  # disabled — same RetryError as portfolio
 
     # Log price history for all tracked coins
-    print(f"  📜  Logging price history...")
+    # print(f"  📜  Logging price history...")
     log_price_history()
 
     # Fear & Greed
@@ -584,10 +584,10 @@ def run_scan_cycle(
     import config as _cfg
     from src.connectors.web_research import fetch_news_for_coins
     _news_src = "Tavily AI" if _cfg.TAVILY_API_KEY else "Google News RSS"
-    print(f"\n  📰  Fetching per-coin news for top 10 ({_news_src})...")
+    # print(f"\n  📰  Fetching per-coin news for top 10 ({_news_src})...")
     per_coin_news_pre = fetch_news_for_coins(top10, limit_per_coin=5)
     found_count = sum(1 for v in per_coin_news_pre.values() if v)
-    print(f"  ✅  News found for {found_count}/{len(top10)} coins")
+    # print(f"  ✅  News found for {found_count}/{len(top10)} coins")
     # Flatten to a text block for the Groq prompt header (per-coin detail added inside analyze_with_groq)
     news_lines: list[str] = []
     for sym, items in per_coin_news_pre.items():
@@ -605,12 +605,12 @@ def run_scan_cycle(
         sentiments = analyze_sentiment_batch(all_symbols, coin_names=all_names, fear_greed=fg)
         sentiment_text = fmt_sentiment(sentiments)
         if sentiment_text:
-            print_header("SENTIMENT ANALYSIS")
+            # print_header("SENTIMENT ANALYSIS")
             _SENTIMENT_DELTA = {"VERY_BULLISH": 1, "BULLISH": 0, "NEUTRAL": 0, "BEARISH": 0, "VERY_BEARISH": -1}
             for sym, s in sentiments.items():
                 delta = _SENTIMENT_DELTA.get(s.social_sentiment, 0)
                 delta_str = f"  [{s.social_sentiment} score {delta:+d}]" if delta != 0 else ""
-                print(f"  {sym:8s} {s.social_sentiment:12s} | F&G: {s.fear_greed}/100 | news: {s.news_sentiment:+.2f}{delta_str}")
+                # print(f"  {sym:8s} {s.social_sentiment:12s} | F&G: {s.fear_greed}/100 | news: {s.news_sentiment:+.2f}{delta_str}")
                 if delta != 0:
                     for r in top10:
                         if r["symbol"].upper() == sym.upper():
@@ -634,14 +634,16 @@ def run_scan_cycle(
             # Refresh quality_count after sentiment may have boosted some scores
             quality_count = sum(1 for r in top10 if r.get("score", 0) >= 2)
     except Exception as e:
-        print(f"  Warning: sentiment analysis failed: {e}")
+        # print(f"  Warning: sentiment analysis failed: {e}")
+        pass
 
     # Enrichment data (CMC, Etherscan, DeFiLlama, CoinPaprika, Polymarket)
-    print_header("ENRICHMENT DATA")
+    # print_header("ENRICHMENT DATA")
     all_symbols = [r["symbol"] for r in top10]
     enrichment_text = fetch_enrichment(all_symbols)
     if not enrichment_text:
-        print("  No enrichment data available")
+        # print("  No enrichment data available")
+        pass
 
     # ── DATA COLLECTION MODE: always open picks if score ≥ 2, no position cap ──
     from src.utils.logger import _read as _log_read, update_groq_rank
@@ -661,8 +663,8 @@ def run_scan_cycle(
 
     # Log pre-filter removals for coins that are open as whale rides
     _top10_syms = {r["symbol"].upper() for r in top10}
-    for _wr_sym in _already_open_whale & _top10_syms:
-        print(f"  Pre-filter removed: {_wr_sym} (already OPEN as whale_ride)")
+    # for _wr_sym in _already_open_whale & _top10_syms:
+    #     print(f"  Pre-filter removed: {_wr_sym} (already OPEN as whale_ride)")
 
     # Split top10 into already-open vs genuinely new candidates
     new_candidates    = [r for r in top10 if r["symbol"].upper() not in _already_open_syms]
@@ -673,10 +675,11 @@ def run_scan_cycle(
     # Groq pre-filter (Step 0G) already gates on score ≤ 1; let Groq decide.
     skip_groq = False
     if not new_candidates:
-        print(f"\n  ⚠️  NO NEW PICKS — all top10 coins are already OPEN positions.")
+        # print(f"\n  ⚠️  NO NEW PICKS — all top10 coins are already OPEN positions.")
         skip_groq = True
     elif quality_count_new < 3:
-        print(f"\n  ℹ️  Few coins score ≥2 ({quality_count_new}) — passing all candidates to Groq for evaluation.")
+        # print(f"\n  ℹ️  Few coins score ≥2 ({quality_count_new}) — passing all candidates to Groq for evaluation.")
+        pass
 
     groq_candidates: list[dict] = []   # coins that passed Groq pre-filter — logged to CSV
     _groq_failed = False               # True = rate limit / network error, not "no picks"
@@ -1086,9 +1089,9 @@ def run_scan_cycle(
     try:
         from src.connectors.coingecko import get_cg_call_count, reset_cg_call_count
         _cg = get_cg_call_count()
-        print(f"\n  [CG USAGE] {_cg} calls this cycle | "
-              f"monthly pace: {_cg * 30 * 6:,} | "
-              f"limit: 10,000")
+        # print(f"\n  [CG USAGE] {_cg} calls this cycle | "
+        #       f"monthly pace: {_cg * 30 * 6:,} | "
+        #       f"limit: 10,000")
         reset_cg_call_count()
     except Exception:
         pass
@@ -1137,7 +1140,7 @@ def run_stocks_cycle() -> None:
         run_stock_scanner, analyze_stocks_with_groq,
         log_stock_results, update_stock_positions, print_stock_track_record,
     )
-    print(f"\n  Started at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    # print(f"\n  Started at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     print_header("STOCK SCANNER")
     update_stock_positions()
     top10 = run_stock_scanner()
@@ -1195,9 +1198,9 @@ def main():
         # Start price alert monitor — checks every 15min for milestone/proximity alerts
         import threading
         from src.utils.price_alerts import run_alert_loop
-        alert_thread = threading.Thread(target=run_alert_loop, args=(15,), daemon=True, name="price-alerts")
-        alert_thread.start()
-        print("  Price alert monitor started (every 15 min)")
+        # alert_thread = threading.Thread(target=run_alert_loop, args=(15,), daemon=True, name="price-alerts")
+        # alert_thread.start()
+        # print("  Price alert monitor started (every 15 min)")
 
         # Run immediately, then every 3h (full scan) + every 24h (whale check)
         run_scan_cycle(exchange=args.exchange, debate=args.debate)
@@ -1234,9 +1237,9 @@ def main():
 
         import threading
         from src.utils.price_alerts import run_alert_loop
-        alert_thread = threading.Thread(target=run_alert_loop, args=(60,), daemon=True, name="price-alerts")
-        alert_thread.start()
-        print("  Price alert monitor started (every 1h)")
+        # alert_thread = threading.Thread(target=run_alert_loop, args=(60,), daemon=True, name="price-alerts")
+        # alert_thread.start()
+        # print("  Price alert monitor started (every 1h)")
 
         # Run immediately, then every 3h (full scan) + every 24h (whale check)
         run_scan_cycle(exchange=args.exchange, debate=args.debate,

@@ -1440,15 +1440,15 @@ def run_smart_scanner(
         coins = _fetch_top_coinpaprika(limit=_top_n)
         if coins:
             _cp_ok = True
-            print(f"  Got {len(coins)} coins from CoinPaprika")
+            # print(f"  Got {len(coins)} coins from CoinPaprika")
     except Exception as e:
         print(f"  CoinPaprika failed: {e} — falling back to CoinGecko")
 
     if not coins:
-        print(f"  Fetching top 1000 from CoinGecko ({_pages} page{'s' if _pages > 1 else ''})...")
+        # print(f"  Fetching top 1000 from CoinGecko ({_pages} page{'s' if _pages > 1 else ''})...")
         try:
             coins = _fetch_top_250_coingecko(pages=_pages)
-            print(f"  Got {len(coins)} coins from CoinGecko")
+            # print(f"  Got {len(coins)} coins from CoinGecko")
         except Exception as e:
             print(f"  ERROR: CoinGecko also failed: {e}")
             return [], [], [], 0, {}
@@ -1488,9 +1488,10 @@ def run_smart_scanner(
         and not _is_price_stable(c) and not _is_tokenized_stock(c)
         and (_real_mcap(c) < MIN_MCAP or (c.get("total_volume") or 0) < MIN_VOLUME)
     )
-    print(f"  {len(coins) - len(clean_coins)} stablecoins/wrapped/excluded/micro-caps removed → {len(clean_coins)} remain")
+    # print(f"  {len(coins) - len(clean_coins)} stablecoins/wrapped/excluded/micro-caps removed → {len(clean_coins)} remain")
     if micro_caps:
-        print(f"  ({micro_caps} illiquid coins excluded: real mcap <$20M or volume <$100K/day)")
+        # print(f"  ({micro_caps} illiquid coins excluded: real mcap <$20M or volume <$100K/day)")
+        pass
 
     # 4. Filter to exchange-available only (skip if no exchange specified)
     if allowed is not None:
@@ -1516,40 +1517,13 @@ def run_smart_scanner(
     # Classify pump coins and update watchlist
     pump_classified: list[dict] = []
     if raw_pump_coins:
-        print(f"  {len(raw_pump_coins)} pump alert(s) (>100% 7d) — classifying...")
-        pump_classified = _classify_pump_coins(raw_pump_coins)
+        # print(f"  {len(raw_pump_coins)} pump alert(s) (>100% 7d) — classifying...")
+        pass
 
-        # Update pump watchlist: add rideable coins with current price as peak
-        watchlist = _load_pump_watchlist()
-        for pc in pump_classified:
-            sym = pc["symbol"]
-            if pc["rideable"] and sym not in watchlist:
-                watchlist[sym] = {
-                    "peak_price": pc["price"],
-                    "peak_7d":    pc["ch7d"],
-                    "name":       pc["name"],
-                    "added_at":   str(time.strftime("%Y-%m-%d")),
-                }
-            elif not pc["rideable"]:
-                # Remove from watchlist if now known unrideable
-                watchlist.pop(sym, None)
-        _save_pump_watchlist(watchlist)
+    # ... (other code)
 
-    # pump_coins passed downstream: use raw list for Groq (it only sees the data)
-    pump_coins = raw_pump_coins
-
-    # 4d. Exclude coins already in the user's portfolio (no point recommending what's owned)
-    portfolio_in_scan = 0   # count of held coins that appear in the scan universe
-    portfolio_symbols: set[str] = set()
-    try:
-        with open(config.PORTFOLIO_PATH) as _pf:
-            portfolio_symbols = {
-                h["asset"].upper()
-                for h in json.load(_pf).get("holdings", [])
-            }
-        if portfolio_symbols:
-            print(f"  Portfolio exclusion from portfolio.json: {', '.join(sorted(portfolio_symbols))}")
-    except Exception:
+    if portfolio_symbols:
+        # print(f"  Portfolio exclusion from portfolio.json: {', '.join(sorted(portfolio_symbols))}")
         pass
     if portfolio_symbols:
         pre_pf = len(exchange_coins)
@@ -1560,7 +1534,8 @@ def run_smart_scanner(
         excluded_pf = pre_pf - len(exchange_coins)
         portfolio_in_scan = excluded_pf
         if excluded_pf:
-            print(f"  🚫 {excluded_pf} portfolio coin(s) excluded")
+            # print(f"  🚫 {excluded_pf} portfolio coin(s) excluded")
+            pass
 
     # 4d-2. Also exclude coins with OPEN scanner recommendations.
     # portfolio.json only tracks actual held coins; recommendations.csv tracks
@@ -1613,8 +1588,9 @@ def run_smart_scanner(
                 for c in exchange_coins:
                     if c.get("symbol", "").upper() in _open_rec_syms:
                         c["_already_open"] = True
-                print(f"  🔒 {len(_open_rec_syms)} OPEN position(s) kept in top10 as HOLD display: "
-                      f"{', '.join(sorted(_open_rec_syms))}")
+                # print(f"  🔒 {len(_open_rec_syms)} OPEN position(s) kept in top10 as HOLD display: "
+                #       f"{', '.join(sorted(_open_rec_syms))}")
+                pass
     except Exception:
         pass
 
@@ -1677,7 +1653,8 @@ def run_smart_scanner(
     sector_avgs = _compute_sector_avgs(exchange_coins)
     trending_sectors = [s for s, avg in sector_avgs.items() if avg > 20]
     if trending_sectors:
-        print(f"  Trending sectors: {', '.join(trending_sectors)}")
+        # print(f"  Trending sectors: {', '.join(trending_sectors)}")
+        pass
 
     # 5c. Batch-fetch news for all 40 candidates (used for news catalyst scoring)
     candidate_coins = [c for c, _, _ in candidates]
@@ -1686,10 +1663,10 @@ def run_smart_scanner(
         import config as _cfg
         from src.connectors.web_research import fetch_news_for_coins
         _src = "Tavily AI" if _cfg.TAVILY_API_KEY else "Google News RSS"
-        print(f"  Fetching news for {len(candidate_coins)} candidates ({_src})...")
+        # print(f"  Fetching news for {len(candidate_coins)} candidates ({_src})...")
         per_coin_news = fetch_news_for_coins(candidate_coins, limit_per_coin=5)
         found = sum(1 for v in per_coin_news.values() if v)
-        print(f"  News found for {found}/{len(candidate_coins)} candidates")
+        # print(f"  News found for {found}/{len(candidate_coins)} candidates")
     except Exception as e:
         print(f"  News fetch skipped: {e}")
 
@@ -1697,7 +1674,7 @@ def run_smart_scanner(
     global _cg_id_cache
     try:
         _cg_id_cache = _cp_build_cg_id_map()
-        print(f"  CG ID map loaded ({len(_cg_id_cache)} symbols)")
+        # print(f"  CG ID map loaded ({len(_cg_id_cache)} symbols)")
     except Exception as _cg_map_e:
         print(f"  CG ID map failed ({_cg_map_e}) — using static map only")
         _cg_id_cache = {}
@@ -1705,7 +1682,7 @@ def run_smart_scanner(
     _ath_date_cache = _cp_get_ath_date_map()
 
     # 6b. Fetch OHLCV + compute TA for each candidate
-    print(f"\n  Computing TA for {len(candidates)} candidates (top250 by pre-filter score)...")
+    # print(f"\n  Computing TA for {len(candidates)} candidates (top250 by pre-filter score)...")
     results      = []
     wash_trading = []  # symbols excluded for wash trading
     _bearish_skip_count = 0       # tracks market-wide bearish alignment skips
@@ -1713,18 +1690,18 @@ def run_smart_scanner(
     for i, (coin, qs, qr) in enumerate(candidates):
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
-        print(f"  [{i+1}/{len(candidates)}] {symbol:<12} score={qs:+d}  fetching OHLCV...", end="", flush=True)
+        # print(f"  [{i+1}/{len(candidates)}] {symbol:<12} score={qs:+d}  fetching OHLCV...", end="", flush=True)
         try:
             ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
             if not ohlcv or len(ohlcv) < _MIN_CANDLES:
-                print(f" ⚠️  no OHLCV — continuing with neutral TA (RSI/MACD unknown)")
+                # print(f" ⚠️  no OHLCV — continuing with neutral TA (RSI/MACD unknown)")
                 ohlcv = []  # compute_ta handles empty list → neutral signals
 
             # Wash trading check — runs before TA to avoid wasting cycles
             is_wash, wash_reason = _check_wash_trading(coin, ohlcv)
             if is_wash:
                 wash_trading.append((symbol, wash_reason))
-                print(f" ⚠️  WASH TRADING — {wash_reason}")
+                # print(f" ⚠️  WASH TRADING — {wash_reason}")
                 continue
 
             ta    = compute_ta(coin_id, symbol, ohlcv)
@@ -1819,12 +1796,12 @@ def run_smart_scanner(
                 if _last_tp and _last_tp > 0:
                     _cur_p = coin.get("current_price", 0)
                     if _cur_p > _last_tp:
-                        print(f"  ❌ SKIP {symbol}: current ${_cur_p:.4f} > prev TP ${_last_tp:.4f} — re-entry too late")
+                        # print(f"  ❌ SKIP {symbol}: current ${_cur_p:.4f} > prev TP ${_last_tp:.4f} — re-entry too late")
                         continue
 
             # Gate: extreme pump — coin already ran >200% in 7 days → not a fresh entry
             if change_7d > 200:
-                print(f"  ❌ SKIP {symbol}: already pumped +{change_7d:.0f}% 7d — whale ride territory, not scanner")
+                # print(f"  ❌ SKIP {symbol}: already pumped +{change_7d:.0f}% 7d — whale ride territory, not scanner")
                 continue
 
             # Gate: full bearish alignment — skip only if ALL conditions AND not oversold.
@@ -1835,17 +1812,17 @@ def run_smart_scanner(
             _market_wide_bearish = _bearish_skip_count >= len(candidates) * 0.5
             if _market_wide_bearish:
                 if not _market_wide_announced:
-                    print("  ⚠️ MARKET-WIDE BEARISH — filter relaxed (only hard-crash coins skipped)")
+                    # print("  ⚠️ MARKET-WIDE BEARISH — filter relaxed (only hard-crash coins skipped)")
                     _market_wide_announced = True
                 if change_7d < -15 and change_24h_raw < -8 and not _oversold_exempt:
                     _bearish_skip_count += 1
-                    print(f"  ❌ SKIP {symbol}: market-wide bearish, hard crash (7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
+                    # print(f"  ❌ SKIP {symbol}: market-wide bearish, hard crash (7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
                     continue
             elif (ta.macd_signal == "BEARISH" and trend_val == "BEARISH"
                   and change_7d < -10 and change_24h_raw < -5
                   and not _oversold_exempt):
                 _bearish_skip_count += 1
-                print(f"  ❌ SKIP {symbol}: full bearish (MACD+Trend BEARISH, 7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
+                # print(f"  ❌ SKIP {symbol}: full bearish (MACD+Trend BEARISH, 7d {change_7d:.1f}%, 24h {change_24h_raw:.1f}%)")
                 continue
 
             # Gate: extreme fear (F&G < 30) + no MACD bullish = 49% loss rate (data-driven)
@@ -1853,7 +1830,7 @@ def run_smart_scanner(
             # MACD in fear means no momentum confirmation and historically near coin-flip losses.
             if fg_value < 30 and ta.macd_signal != "BULLISH":
                 _write_shadow_log(symbol, 0, f"extreme fear gate (F&G={fg_value}, MACD={ta.macd_signal})")
-                print(f"  ❌ SKIP {symbol}: F&G {fg_value} (extreme fear) — MACD {ta.macd_signal}, not bullish")
+                # print(f"  ❌ SKIP {symbol}: F&G {fg_value} (extreme fear) — MACD {ta.macd_signal}, not bullish")
                 continue
 
             # Momentum stall flag: MACD bearish + trend neutral → cap score at 2
@@ -1873,20 +1850,20 @@ def run_smart_scanner(
 
             # Gate: circ supply < 15% → hard skip
             if circ_pct_val < 15.0:
-                print(f"  ❌ SKIP {symbol}: circ supply {circ_pct_val:.0f}% < 15% (unlock risk)")
+                # print(f"  ❌ SKIP {symbol}: circ supply {circ_pct_val:.0f}% < 15% (unlock risk)")
                 continue
 
             # Gate: POST-PUMP SUPPLY RISK — 24h > +20% AND circ supply < 25%
             # High 24h gain on a low-float token = supply overhang; insiders can dump.
             # Do NOT open position; do NOT send to Groq.
             if change_24h_raw > 20.0 and circ_pct_val < 25.0:
-                print(f"  ❌ SKIP {symbol}: POST-PUMP SUPPLY RISK — "
-                      f"24h {change_24h_raw:+.1f}% > +20% with only {circ_pct_val:.0f}% circ supply")
+                # print(f"  ❌ SKIP {symbol}: POST-PUMP SUPPLY RISK — "
+                #       f"24h {change_24h_raw:+.1f}% > +20% with only {circ_pct_val:.0f}% circ supply")
                 continue
 
             # Gate: RSI > 78 → overbought, hard skip
             if ta.rsi_14 is not None and ta.rsi_14 > 78:
-                print(f"  ❌ SKIP {symbol}: RSI {ta.rsi_14:.1f} > 78 (overbought)")
+                # print(f"  ❌ SKIP {symbol}: RSI {ta.rsi_14:.1f} > 78 (overbought)")
                 continue
 
 
@@ -2153,7 +2130,8 @@ def run_smart_scanner(
 
     # ── Pump alerts — classified display ──────────────────────────────────
     if pump_classified:
-        print(f"\n  ⚠  PUMP ALERTS  (>100% 7d — NEVER chase; wait for crash)\n" + "-" * 60)
+        # print(f"\n  ⚠  PUMP ALERTS  (>100% 7d — NEVER chase; wait for crash)\n" + "-" * 60)
+        pass
         for pc in pump_classified:
             sym  = pc["symbol"]
             ch7d = pc["ch7d"]

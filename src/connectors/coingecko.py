@@ -298,10 +298,14 @@ def fetch_fear_greed() -> dict:
         return cached
 
     url = "https://api.alternative.me/fng/?limit=1"
-    with httpx.Client(timeout=15) as client:
-        resp = client.get(url)
-        resp.raise_for_status()
-        data = resp.json()["data"][0]
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()["data"][0]
+    except (httpx.RequestError, httpx.HTTPStatusError, Exception) as e:
+        print(f"  ⚠️  Fear & Greed fetch failed ({type(e).__name__}): {e} — using neutral fallback")
+        return {"value": 50, "label": "Neutral", "timestamp": datetime.utcnow()}
 
     result = {
         "value": int(data["value"]),

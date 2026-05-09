@@ -327,7 +327,7 @@ Having 10 picks is mandatory so the portfolio always has fresh candidates to ope
   ]
 }}"""
 
-    print("\n  Sending to Groq (llama-3.3-70b)...")
+    # print("\n  Sending to Groq (llama-3.3-70b)...")
 
     try:
         response = client.chat.completions.create(
@@ -465,7 +465,7 @@ Having 10 picks is mandatory so the portfolio always has fresh candidates to ope
                 _seen_coins[_sym] = _pick
     if len(_seen_coins) < len(raw_picks):
         _dupes = len(raw_picks) - len(_seen_coins)
-        print(f"  [dedup] removed {_dupes} duplicate coin(s) from Groq output")
+        # print(f"  [dedup] removed {_dupes} duplicate coin(s) from Groq output")
     raw_picks = list(_seen_coins.values())
 
     if not raw_picks:
@@ -561,7 +561,7 @@ Having 10 picks is mandatory so the portfolio always has fresh candidates to ope
                 _reward = _tp - _ep
                 if _risk > 0 and _reward / _risk < 2.5:
                     _new_tp = round(_ep + _risk * 2.5, 8)
-                    print(f"  ⚠️  R:R fix: {_g.get('coin')} TP {_tp:.6f} → {_new_tp:.6f} (enforcing 2.5:1)")
+                    # print(f"  ⚠️  R:R fix: {_g.get('coin')} TP {_tp:.6f} → {_new_tp:.6f} (enforcing 2.5:1)")
                     _g["take_profit"] = _new_tp
         except (TypeError, ValueError):
             pass
