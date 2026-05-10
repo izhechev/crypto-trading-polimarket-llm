@@ -78,10 +78,19 @@ def get_eur_usd_rate() -> float:
         if time.time() - ts < CACHE_TTL:
             return rate
     try:
+        url = f"{_base_url()}/simple/price"
+        params = {"ids": "tether", "vs_currencies": "eur"}
+        # Auth for Demo tier
+        try:
+            import config
+            if config.COINGECKO_API_KEY and "pro-api" not in url:
+                params["x_cg_demo_api_key"] = config.COINGECKO_API_KEY
+        except Exception: pass
+
         with httpx.Client(timeout=10) as client:
             resp = client.get(
-                "https://pro-api.coingecko.com/api/v3/simple/price",
-                params={"ids": "tether", "vs_currencies": "eur"},
+                url,
+                params=params,
                 headers=_headers(),
                 timeout=10,
             )
@@ -108,8 +117,15 @@ def _fetch_eur_prices(coin_ids: list[str]) -> dict[str, float]:
         return cached
 
     try:
-        url = "https://pro-api.coingecko.com/api/v3/simple/price"
+        url = f"{_base_url()}/simple/price"
         params = {"ids": ",".join(coin_ids), "vs_currencies": "eur"}
+        # Auth for Demo tier
+        try:
+            import config
+            if config.COINGECKO_API_KEY and "pro-api" not in url:
+                params["x_cg_demo_api_key"] = config.COINGECKO_API_KEY
+        except Exception: pass
+
         with httpx.Client(timeout=15) as client:
             resp = _cg_get(client, url, params=params, headers=_headers())
             resp.raise_for_status()
@@ -134,8 +150,15 @@ def fetch_simple_usd(coin_ids: list[str]) -> dict[str, float]:
     if cached is not None:
         return cached
     try:
-        url = "https://pro-api.coingecko.com/api/v3/simple/price"
+        url = f"{_base_url()}/simple/price"
         params = {"ids": ",".join(coin_ids), "vs_currencies": "usd"}
+        # Auth for Demo tier
+        try:
+            import config
+            if config.COINGECKO_API_KEY and "pro-api" not in url:
+                params["x_cg_demo_api_key"] = config.COINGECKO_API_KEY
+        except Exception: pass
+
         with httpx.Client(timeout=15) as client:
             resp = _cg_get(client, url, params=params, headers=_headers())
             resp.raise_for_status()
@@ -165,10 +188,20 @@ def fetch_prices(coin_ids: list[str]) -> list[CryptoPrice]:
         raise
 
 
+def _base_url() -> str:
+    try:
+        import config
+        if config.COINGECKO_API_KEY and len(config.COINGECKO_API_KEY) > 10:
+            # Pro keys are usually longer/structured differently, 
+            # but more importantly, many users use the Demo tier.
+            return "https://api.coingecko.com/api/v3"
+    except Exception: pass
+    return "https://api.coingecko.com/api/v3"
+
 @retry(wait=wait_exponential(min=4, max=60), stop=stop_after_attempt(4))
 def _fetch_prices_live(coin_ids: list[str], cache_key: str) -> list[CryptoPrice]:
     ids_str = ",".join(coin_ids)
-    url = "https://pro-api.coingecko.com/api/v3/coins/markets"
+    url = f"{_base_url()}/coins/markets"
     params = {
         "vs_currency": "usd",
         "ids": ids_str,
@@ -176,9 +209,20 @@ def _fetch_prices_live(coin_ids: list[str], cache_key: str) -> list[CryptoPrice]
         "sparkline": "false",
         "price_change_percentage": "24h,7d,30d",
     }
+    
+    # Add key to params for Demo API, or headers for Pro
+    headers = _headers()
+    try:
+        import config
+        if config.COINGECKO_API_KEY:
+            if "pro-api" in _base_url():
+                pass # Already in headers via _headers()
+            else:
+                params["x_cg_demo_api_key"] = config.COINGECKO_API_KEY
+    except Exception: pass
 
     with httpx.Client(timeout=30) as client:
-        resp = _cg_get(client, url, params=params, headers=_headers())
+        resp = _cg_get(client, url, params=params, headers=headers)
         resp.raise_for_status()
         data = resp.json()
 

@@ -231,9 +231,14 @@ def update_open_positions() -> None:
         except Exception: pass
 
     coin_ids = list({r["coin_id"] for r in open_rows if r.get("coin_id")})
+    if not coin_ids:
+        # print("  ℹ️ No coin_ids found for open positions — updates pending healing")
+        return
+
     try:
         price_objs = fetch_prices(coin_ids)
         usd_map = {p.coin_id: p.price_usd for p in price_objs}
+        # print(f"  📊 Fetched {len(usd_map)}/{len(coin_ids)} prices from CoinGecko")
     except Exception as e:
         print(f"  Warning: price update failed: {e}")
         return
