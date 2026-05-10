@@ -427,6 +427,21 @@ def log_scanner_results(top10: list[dict], fear_greed_value: int) -> None:
     pass
 
 
+def update_scanner_sltp(coin: str, stop_loss: float, take_profit: float, reasoning: str = "") -> None:
+    """Backwards compat alias."""
+    pass
+
+
+def log_portfolio_positions() -> None:
+    """Backwards compat alias."""
+    pass
+
+
+def log_watchlist_prices() -> None:
+    """Backwards compat alias."""
+    pass
+
+
 def log_portfolio_results(holdings: list[dict]) -> None:
     """Backwards compat alias."""
     pass
