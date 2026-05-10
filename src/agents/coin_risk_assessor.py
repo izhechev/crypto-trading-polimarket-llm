@@ -137,23 +137,21 @@ def _onchain_flags(coin: dict) -> list[str]:
     if vol > 0 and mcap > 0 and vol / mcap > _PANIC_VOL_FRAC and ch24 <= -20:
         flags.append(f"panic exit: volume {vol/mcap:.0%} of mcap while -20%+ today")
 
-    # DEAD_PROJECT: ATH drop >99.5% AND rank > 300 AND mcap < $50M AND vol < $1M/day.
-    # All four must be true — this is intentionally strict.
+    # DEAD_PROJECT: ATH drop >99.7% AND rank > 500 AND mcap < $30M AND vol < $250K/day.
+    # All four must be true — this is extremely strict to avoid false positives.
     #
     # Why each guard:
-    #  -99.5% ATH:  bear-market alts are routinely -93% to -99%; ENJ/SUSHI/KSM are -99% but alive.
-    #               -99.5%+ means the coin lost 200x from its peak AND never recovered.
-    #  rank > 300:  genuinely dead coins fall below rank 300 as capital flees.
-    #  mcap < $50M: truly abandoned projects have tiny remaining market caps.
-    #  vol < $1M/day: if anyone is actively trading it, it's not dead.
+    #  -99.7% ATH:  Deepest drawdown tier (1/300th of peak value).
+    #  rank > 500:  Truly marginalized projects.
+    #  mcap < $30M: Very low capitalization.
+    #  vol < $250K: Very low liquidity; if anyone trades >$250k/day, it's alive.
     #
-    # Examples of CORRECTLY dead: old Terra Luna Classic forks, abandoned ICO tokens.
-    # Examples of INCORRECTLY dead (must be excluded): ENJ, SUSHI, KSM, SNX, KAVA.
-    if (ath_pct <= -99.5 and rank > 300
-            and mcap < 50_000_000 and vol < 1_000_000):
+    # ICX ($44M cap, $783K vol) will no longer be flagged.
+    if (ath_pct <= -99.7 and rank > 500
+            and mcap < 30_000_000 and vol < 250_000):
         flags.append(
             f"likely dead: {ath_pct:.1f}% below ATH, rank #{rank}, "
-            f"mcap ${mcap/1e6:.0f}M, vol ${vol/1e6:.2f}M/day"
+            f"mcap ${mcap/1e6:.1f}M, vol ${vol/1e6:.2f}M/day"
         )
 
     if total > 0 and circ > 0 and circ / total < _LOW_CIRC_FRAC:
@@ -252,11 +250,10 @@ def _groq_verdict(
     prompt = (
         "You are a crypto security analyst. Assess each flagged coin and categorise it.\n\n"
         "Categories:\n"
-        "  DEAD_PROJECT     — truly abandoned: no active dev, no community, essentially zero trading\n"
-        "                     DO NOT use this for coins that are just far below ATH — that describes\n"
-        "                     MOST altcoins after a bear market (ENJ, SUSHI, KSM, SNX, KAVA are NOT dead).\n"
-        "                     ONLY use DEAD_PROJECT if: abandoned ICO / rug with no recovery ever /\n"
-        "                     vol < $1M/day AND rank below 500 AND no active development.\n"
+        "  DEAD_PROJECT     — truly abandoned: no active dev, no community, essentially zero trading.\n"
+        "                     DO NOT use this for coins that are just deep below ATH (ENJ, SUSHI, ICX are ALIVE).\n"
+        "                     ONLY use DEAD_PROJECT if: volume is tiny (<$100k) AND rank is deep tail (>800)\n"
+        "                     AND there are reports of abandonment / rug with no recovery.\n"
         "  ACTIVE_SCAM      — ongoing fraud/rug pull, do not recommend buying\n"
         "  MANIPULATED_REAL — real project with genuine utility BUT extreme price manipulation\n"
         "                     (can be tracked as a high-risk whale ride only)\n"
@@ -407,7 +404,8 @@ def _heuristic_category(onchain_flags: list[str], news_hits: list[str]) -> str:
     scam_news = sum(1 for h in news_hits if any(p in h.lower() for p in ("scam","rug","fraud","exit")))
     if scam_news >= 3:
         return "ACTIVE_SCAM"
-    if any("likely dead" in f or "collapsed" in f for f in onchain_flags):
+    # Extremely strict fallback for dead projects
+    if any("likely dead" in f for f in onchain_flags) and scam_news >= 1:
         return "DEAD_PROJECT"
     if any("rug pull" in f or "panic exit" in f for f in onchain_flags):
         return "SUSPICIOUS"
