@@ -556,6 +556,19 @@ def run_scan_cycle(
 
     # ── God-Tier Extreme Filtering (100% Win-Rate Mode) ──
     # User requested absolute highest confidence only, even if it means 1 entry per day.
+    
+    # ── Professional Alpha: BTC Safety Gate ──
+    # If BTC is dumping, altcoin longs fail 90% of the time.
+    _btc_gate_active = False
+    try:
+        from src.connectors.coingecko import fetch_prices
+        btc_data = fetch_prices(["bitcoin"])
+        if btc_data and btc_data[0].change_24h < -1.0:
+            _btc_gate_active = True
+            print(f"\n  🛑 BTC SAFETY GATE ACTIVE (BTC {btc_data[0].change_24h:+.1f}% 24h)")
+            print("     Blocking all new LONG/SPOT entries until market stabilizes.")
+    except Exception: pass
+
     # We require a strict Groq HIGH confidence verdict (>= 0.8).
     best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.8]
     
@@ -572,6 +585,11 @@ def run_scan_cycle(
             _meets_extreme_score = (_side in ("LONG", "SHORT") and _score >= 10) or (_side == "SPOT" and _score >= 8)
 
             if _meets_extreme_score:
+                # Apply BTC Gate: Block Long/Spot if BTC is bearish
+                if _btc_gate_active and _side in ("LONG", "SPOT"):
+                    print(f"  🛑 {_sym} rejected: Setup is elite, but BTC Safety Gate is BLOCKING longs.")
+                    continue
+
                 print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}, Score: {_score}) | Price: ${p.get('entry_price', 0):.4f}")
                 print(f"     💬 {p.get('reasoning', '')[:120]}...")
 
@@ -603,6 +621,10 @@ def run_scan_cycle(
     for wr in whale_rides:
         _sym = wr.get("symbol", "").upper()
         if _sym not in _already_open_syms:
+            # BTC Gate also applies to Whale Rides (unless they are Shorts, but WRs are usually Longs)
+            if _btc_gate_active:
+                continue
+
             if wr.get("cycle_number", 0) >= 3 or wr.get("hc_score", 0) >= 7:
                 log_whale_ride(wr, fg.get("value", 50))
                 _already_open_syms.add(_sym)

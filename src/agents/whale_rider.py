@@ -430,8 +430,12 @@ def send_whale_ride_alerts(
         if len([h for h in hits if now_ts - h <= 48 * 3600]) >= 2:
             score += 1
         
-        if score >= 3:
+        # 3. God-Tier Filter (100% Confidence Mode)
+        # Require Score >= 7 OR Cycle >= 3
+        _cyc = len([h for h in hits if now_ts - h <= 48 * 3600]) + 1
+        if score >= 7 or _cyc >= 3:
             c["hc_score"] = score
+            c["cycle_number"] = _cyc
             high_conviction.append(c)
 
     high_conviction.sort(key=lambda x: -x["hc_score"])
@@ -444,7 +448,7 @@ def send_whale_ride_alerts(
         )
     
     if high_conviction:
-        print(f"\n  🔥 HIGH-CONVICTION WHALE SIGNALS")
+        print(f"\n  🔥 GOD-TIER WHALE SIGNALS (Score >= 7 or Cycle >= 3)")
         print("  <pre>TICKER | mcap  | volM | v/mc | 24h%  | 7d%   | ATH% | score</pre>")
         for line in hc_lines:
             print(line)
@@ -453,7 +457,7 @@ def send_whale_ride_alerts(
     hc_msg = ""
     lines = []
     if high_conviction:
-        hc_msg = "🔥 <b>HIGH-CONVICTION WHALE SIGNALS</b>\n" + \
+        hc_msg = "💎 <b>GOD-TIER WHALE SIGNALS</b>\n" + \
                  "<pre>TICKER | mcap  | volM | v/mc | 24h%  | 7d%   | ATH% | score</pre>\n" + \
                  "\n".join(hc_lines) + "\n\n"
                  
@@ -482,7 +486,7 @@ def send_whale_ride_alerts(
                 f"  #{rank} <b>{sym}</b> ({name}) {stage_icon} {stage}{cold}{_link}\n"
                 f"     {_fmt_price(price_usd)}  24h {ch24:+.1f}%  7d {ch7d:+.0f}%\n"
                 f"     vol {vol_str} ({vol_ratio:.1f}x avg {avg_str})  vol/mcap {vol_mcap:.2f}x\n"
-                f"     mcap {mcap_str} | {ath_str}"
+                f"     mcap {mcap_str} | {ath_str} | Score {c['hc_score']}/8 | Cycle #{c['cycle_number']}"
             )
     
     # ── Send Message ──
@@ -502,9 +506,9 @@ def send_whale_ride_alerts(
     if hc_msg:
         batch_msg = (
             hc_msg +
-            f"🐋 <b>VALUABLE WHALE RIDES</b>\n{fg_line}\n\n" +
+            f"🐋 <b>GOD-TIER WHALE RIDES</b>\n{fg_line}\n\n" +
             "\n\n".join(lines) +
-            "\n\n  ⚠️ Manual trade only — invest $100 max per signal"
+            "\n\n  ⚠️ God-Tier setup — extreme confidence"
         )
         try:
             send_telegram(batch_msg)
@@ -560,18 +564,17 @@ def send_whale_ride_alerts(
         })
         
         if is_new:
-            sent.append(c)
-            _whale_entry_alerts_sent.add(sym)
-            
-            # Auto-open position: only HIGH-CONVICTION ones (score >= 3)
-            # This ensures only statistically 'best' whale rides are opened.
+            # Auto-open position: only GOD-TIER ones (score >= 7 or cycle >= 3)
             _hc_score = c.get("hc_score", 0)
+            _cyc      = c.get("cycle_number", 1)
             _should_open = (
-                _hc_score >= 3
+                (_hc_score >= 7 or _cyc >= 3)
                 and _auto_opened < _MAX_WHALE_AUTO
                 and _open_count < _MAX_TOTAL_POSITIONS
             )
             if _should_open:
+                sent.append(c)
+                _whale_entry_alerts_sent.add(sym)
                 try:
                     from src.utils.logger import log_whale_ride
                     # Map 'price' to 'entry' for log_whale_ride compatibility

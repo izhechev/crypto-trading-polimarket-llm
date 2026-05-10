@@ -144,6 +144,40 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
         elif rsi > 50: bullish_score += 1
         else: bearish_score += 1
 
+    # Professional Alpha: Advanced predictive indicators
+    # 1. Funding Rate & OI (Futures Sentiment)
+    try:
+        from src.connectors.binance import fetch_binance_futures_data
+        futures = fetch_binance_futures_data(symbol)
+        if futures:
+            fr = futures.get("funding_rate", 0)
+            # Alpha: Deeply negative funding on a pump = Short Squeeze potential
+            if fr < -0.05 and price_change_24h > 5:
+                bullish_score += 2
+                observations.append(f"⚠️ NEGATIVE FUNDING ({fr:.3f}%): Short squeeze risk — high bounce potential")
+            elif fr > 0.05:
+                bearish_score += 1
+                observations.append(f"⚠️ POSITIVE FUNDING ({fr:.3f}%): Overcrowded long — dump risk")
+    except Exception: pass
+
+    # 2. Order Book Imbalance
+    try:
+        from src.connectors.binance import fetch_binance_orderbook
+        ob = fetch_binance_orderbook(symbol, limit=20)
+        if ob:
+            bids_vol = sum(b[1] for b in ob.get("bids", []))
+            asks_vol = sum(a[1] for a in ob.get("asks", []))
+            if asks_vol > 0:
+                imbalance = bids_vol / asks_vol
+                if imbalance > 3.0:
+                    bullish_score += 1
+                    observations.append(f"⚖️ BUY IMBALANCE: {imbalance:.1f}x more buy pressure in order book")
+                elif imbalance < 0.33:
+                    bearish_score += 1
+                    observations.append(f"⚖️ SELL IMBALANCE: {1/imbalance:.1f}x more sell pressure in order book")
+    except Exception: pass
+
+    # Technical Scoring logic continues
     if macd_signal == "BULLISH":
         bullish_score += 2
         if macd_line_val < 0: bullish_score += 1 # Cross below zero is stronger

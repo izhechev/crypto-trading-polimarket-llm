@@ -125,6 +125,43 @@ def _get_exchange(authenticated: bool = False):
 
 # ── Public endpoints (no API key needed) ─────────────────────────────────
 
+def fetch_binance_futures_data(symbol: str) -> dict | None:
+    """
+    Fetch Funding Rate and Open Interest for a symbol (e.g. 'BTC').
+    Uses the Binance Futures API via ccxt.
+    """
+    cache_key = f"bn_futures_{symbol.upper()}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    pair = f"{symbol.upper()}/USDT"
+    try:
+        import ccxt
+        # Use binanceusdm for USD-margined futures
+        exchange = ccxt.binanceusdm({"enableRateLimit": True})
+        
+        # 1. Fetch Funding Rate
+        funding = exchange.fetch_funding_rate(pair)
+        funding_rate = funding.get("fundingRate", 0) * 100  # as percentage
+        
+        # 2. Fetch Open Interest
+        oi_data = exchange.fetch_open_interest(pair)
+        oi_usd = oi_data.get("baseVolume", 0) * oi_data.get("last", 0)
+        
+        result = {
+            "symbol":        symbol.upper(),
+            "funding_rate":  round(funding_rate, 5),
+            "oi_usd":        round(oi_usd, 0),
+            "timestamp":     time.time(),
+        }
+        _set_cache(cache_key, result)
+        return result
+    except Exception as e:
+        # print(f"  [Binance Futures] error for {symbol}: {e}")
+        return None
+
+
 def fetch_binance_ticker(symbol: str) -> dict | None:
     """Fetch 24h ticker for a symbol (e.g. 'BTC').
 
