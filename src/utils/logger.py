@@ -238,16 +238,37 @@ def update_open_positions() -> None:
     try:
         price_objs = fetch_prices(coin_ids)
         usd_map = {p.coin_id: p.price_usd for p in price_objs}
-        # print(f"  📊 Fetched {len(usd_map)}/{len(coin_ids)} prices from CoinGecko")
     except Exception as e:
-        print(f"  Warning: price update failed: {e}")
+        print(f"  Warning: CG price update failed: {e}")
+        usd_map = {}
+
+    # ── Multi-Source Fallback (Binance/Kraken) ──
+    # If a price is missing from CG, try other exchanges
+    for r in open_rows:
+        cid = r.get("coin_id")
+        sym = r.get("coin", "").upper()
+        if not usd_map.get(cid):
+            try:
+                # 1. Try Binance
+                from src.connectors.binance import fetch_binance_ticker
+                bn = fetch_binance_ticker(sym)
+                if bn and bn.get("price"):
+                    usd_map[cid] = bn["price"]
+                    # print(f"  🔄 Fallback price for {sym}: ${bn['price']:.6f} (Binance)")
+                    continue
+                
+                # 2. Try Kraken
+                from src.connectors.kraken import fetch_kraken_ticker
+                kr = fetch_kraken_ticker(sym)
+                if kr and kr.get("price"):
+                    usd_map[cid] = kr["price"]
+                    # print(f"  🔄 Fallback price for {sym}: ${kr['price']:.6f} (Kraken)")
+                    continue
+            except Exception: pass
+
+    if not usd_map:
+        # print("  ⚠️  No prices available from any source.")
         return
-
-    _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    new_wins = []
-
-    for row in rows:
-        if row.get("status") != "OPEN": continue
         
         usd = usd_map.get(row.get("coin_id"))
         if usd is None: continue

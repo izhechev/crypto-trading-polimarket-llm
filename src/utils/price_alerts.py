@@ -189,6 +189,30 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
                                 result[_cid] = float(_usd)
             except Exception:
                 pass
+    # Retries for still-missing coins using Binance/Kraken fallbacks
+    _final_missing = [r for r in (open_rows or []) if r.get("coin_id") not in result]
+    if _final_missing:
+        for _r in _final_missing:
+            _sym = _r.get("coin", "").upper()
+            _cid = _r.get("coin_id", "")
+            try:
+                # 1. Try Binance
+                from src.connectors.binance import fetch_binance_ticker
+                bn = fetch_binance_ticker(_sym)
+                if bn and bn.get("price"):
+                    result[_cid] = float(bn["price"])
+                    # print(f"  [alerts] 🔄 Fallback price for {_sym}: ${bn['price']:.6f} (Binance)")
+                    continue
+                
+                # 2. Try Kraken
+                from src.connectors.kraken import fetch_kraken_ticker
+                kr = fetch_kraken_ticker(_sym)
+                if kr and kr.get("price"):
+                    result[_cid] = float(kr["price"])
+                    # print(f"  [alerts] 🔄 Fallback price for {_sym}: ${kr['price']:.6f} (Kraken)")
+                    continue
+            except Exception: pass
+
     return result
 
 

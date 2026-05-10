@@ -1659,7 +1659,7 @@ def run_smart_scanner(
             continue   # hard pre-exclude (pumped/micro-cap/low-float)
         quick_scored.append((coin, qs, qr))
     quick_scored.sort(key=lambda x: x[1], reverse=True)
-    candidates = quick_scored[:250]
+    candidates = quick_scored[:80]
 
     # 5b. Compute sector averages from the full coin list (narrative momentum)
     sector_avgs = _compute_sector_avgs(exchange_coins)
@@ -1709,12 +1709,10 @@ def run_smart_scanner(
                 # print(f" ⚠️  no OHLCV — continuing with neutral TA (RSI/MACD unknown)")
                 ohlcv = []  # compute_ta handles empty list → neutral signals
 
-            # Wash trading check — runs before TA to avoid wasting cycles
+            # Wash trading check — previously excluded, now treated as MANIPULATION PLAY
             is_wash, wash_reason = _check_wash_trading(coin, ohlcv)
-            if is_wash:
-                wash_trading.append((symbol, wash_reason))
-                # print(f" ⚠️  WASH TRADING — {wash_reason}")
-                continue
+            wash_tag = " [MANIPULATION PLAY]" if is_wash else ""
+            wash_bonus = 2 if is_wash else 0
 
             ta    = compute_ta(coin_id, symbol, ohlcv)
             vm    = round((coin.get("total_volume") or 0) / max(coin.get("market_cap") or 1, 1), 3)
@@ -1880,7 +1878,7 @@ def run_smart_scanner(
 
 
             circ_cap_reason = []
-            raw_score = qs + ts + cs + ns + ss + proven_score
+            raw_score = qs + ts + cs + ns + ss + proven_score + wash_bonus
 
             # Gate: score ≤ 0 → skip entirely
             if raw_score <= 0:
@@ -1905,7 +1903,7 @@ def run_smart_scanner(
                 supply_risk = "NONE"
 
             risk_warning  = coin.get("_risk_warning", "")
-            extra_reasons = qr + tr + cr + nr + sr + proven_reason + _stall_reason + circ_cap_reason
+            extra_reasons = qr + tr + cr + nr + sr + proven_reason + _stall_reason + circ_cap_reason + ([f"Manipulation Intent (Wash Trading) (+2)"] if is_wash else [])
             if risk_warning and supply_risk == "NONE":
                 # Only prepend risk_warning for coins not already flagged by supply tier
                 extra_reasons = [f"⚠️ {risk_warning[:80]}"] + extra_reasons
@@ -1976,7 +1974,7 @@ def run_smart_scanner(
             _price_usd = coin.get("current_price", 0)
             results.append({
                 "coin_id":         coin_id,
-                "symbol":          symbol,
+                "symbol":          symbol + wash_tag,
                 "name":            coin.get("name", ""),
                 "price":           _price_usd,
                 "price_eur":       coin.get("current_price_eur") or _price_usd * _eur,
