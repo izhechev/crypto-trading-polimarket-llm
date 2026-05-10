@@ -573,12 +573,18 @@ def run_scan_cycle(
 
             if _sym not in _already_open_syms:
                 _ep = float(p.get("entry_price") or 0)
-                if _ep > 0:
+                _cid = p.get("coin_id")
+                # CRITICAL: ensure coin_id is present for price updates
+                if not _cid:
+                    matched = next((r for r in top10 if r["symbol"].upper() == _sym), None)
+                    if matched: _cid = matched["coin_id"]
+
+                if _ep > 0 and _cid:
                     if _side == "SHORT": _tp, _sl = _ep * 0.90, _ep * 1.10
                     else: _tp, _sl = _ep * 1.10, _ep * 0.90
                     
                     log_recommendation({
-                        "coin": _sym, "coin_id": p.get("coin_id", ""),
+                        "coin": _sym, "coin_id": _cid,
                         "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
                         "timeframe": "24h Window", "reasoning": f"BUY Conf: {_conf}",
                         "recommended_order": _side,
