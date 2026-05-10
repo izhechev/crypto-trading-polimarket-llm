@@ -116,7 +116,7 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
         return {}
 
     import httpx as _httpx
-    from src.connectors.coingecko import _headers as _cg_headers
+    from src.connectors.coingecko import _headers as _cg_headers, _base_url as _cg_base_url
     from src.connectors.coinpaprika import resolve_cg_id as _resolve_cg_id
 
     result: dict[str, float] = {}
@@ -147,7 +147,7 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
     # CoinGecko /simple/price — single source of truth
     try:
         resp = _httpx.get(
-            "https://pro-api.coingecko.com/api/v3/simple/price",
+            f"{_cg_base_url()}/simple/price",
             params={"ids": ",".join(_cg_to_cids.keys()), "vs_currencies": "usd"},
             headers=_cg_headers(),
             timeout=15,
@@ -176,7 +176,7 @@ def _fetch_prices_usd(coin_ids: list[str], open_rows: list[dict] | None = None) 
         if _retry:
             try:
                 _r2 = _httpx.get(
-                    "https://pro-api.coingecko.com/api/v3/simple/price",
+                    f"{_cg_base_url()}/simple/price",
                     params={"ids": ",".join(_retry.keys()), "vs_currencies": "usd"},
                     headers=_cg_headers(),
                     timeout=15,

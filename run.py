@@ -207,18 +207,15 @@ def _fetch_coins_whale(pages: int = 4) -> list[dict]:
 
     # ── 2. CoinGecko fallback (pages×250, free tier 30/min) ───────────────
     if not all_coins:
+        from src.connectors.coingecko import _cg_get, _base_url, _headers
         import httpx
-        import config as _cfg
-        headers = {}
-        if _cfg.COINGECKO_API_KEY:
-            headers["x-cg-demo-api-key"] = _cfg.COINGECKO_API_KEY
+        headers = _headers()
         for page in range(1, pages + 1):
             try:
-                from src.connectors.coingecko import _cg_get
                 with httpx.Client(timeout=30) as client:
                     resp = _cg_get(
                         client,
-                        "https://api.coingecko.com/api/v3/coins/markets",
+                        f"{_base_url()}/coins/markets",
                         params={
                             "vs_currency":             "usd",
                             "order":                   "market_cap_desc",
