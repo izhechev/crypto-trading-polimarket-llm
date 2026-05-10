@@ -457,7 +457,7 @@ def send_whale_ride_alerts(
                  "<pre>TICKER | mcap  | volM | v/mc | 24h%  | 7d%   | ATH% | score</pre>\n" + \
                  "\n".join(hc_lines) + "\n\n"
                  
-        for rank, c in enumerate(high_conviction[:5], 1):
+        for rank, c in enumerate(high_conviction, 1):
             sym         = c["symbol"]
             name        = c.get("name", sym)
             stage       = c["stage"]

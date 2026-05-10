@@ -2058,9 +2058,9 @@ def run_smart_scanner(
 
     # ── Most Valuable Only ──
     # Show Top Long/Short/Spot picks (no score gate, user wants "top" of each)
-    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG"][:5]
-    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT"][:5]
-    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT"][:5]
+    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG"]
+    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT"]
+    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT"]
     top10 = normal_results[:10]
 
     # Fetch 1-sentence news catalysts for actual picks

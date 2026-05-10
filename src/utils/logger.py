@@ -256,8 +256,16 @@ def update_open_positions() -> None:
         except (ValueError, TypeError): continue
         if entry <= 0: continue
 
-        is_short = row.get("recommended_order") == "SHORT"
-        pnl_pct = ((entry - usd) if is_short else (usd - entry)) / entry * 100
+        order_type = row.get("recommended_order", "SPOT")
+        is_short = order_type == "SHORT"
+        is_long = order_type == "LONG"
+        
+        base_pnl_pct = ((entry - usd) if is_short else (usd - entry)) / entry * 100
+        
+        if is_long or is_short:
+            pnl_pct = base_pnl_pct * 10.0  # 10x leverage
+        else:
+            pnl_pct = base_pnl_pct
             
         row["current_price"] = str(round(usd, 8))
         row["pnl_pct"] = str(round(pnl_pct, 2))
@@ -416,12 +424,14 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
                 entry = float(r.get("entry_price") or 0)
                 curr = float(r.get("current_price") or entry)
                 try:
+                    pnl = float(r.get("pnl_pct") or 0)
+                except ValueError:
+                    pnl = 0.0
+                try:
                     entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                     hrs = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
                     age_str = f"{hrs:.1f}h" if hrs < 24 else f"{hrs/24:.1f}d"
                 except Exception: age_str = "?h"
-                is_short = r.get("recommended_order") == "SHORT"
-                pnl = ((entry - curr) if is_short else (curr - entry)) / entry * 100 if entry > 0 else 0
                 icon = "🟢" if pnl >= 0 else "🔴"
                 side = r.get("recommended_order", "SPOT")
                 print(f"    {icon} {r['coin']:8s}  {pnl:+.1f}% ({side})  [{age_str}]  entry {_pfmt(entry)}  now {_pfmt(curr)}")
@@ -436,11 +446,14 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
                 entry = float(r.get("entry_price") or 0)
                 curr = float(r.get("current_price") or entry)
                 try:
+                    pnl = float(r.get("pnl_pct") or 0)
+                except ValueError:
+                    pnl = 0.0
+                try:
                     entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                     hrs = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
                     age_str = f"{hrs:.1f}h" if hrs < 24 else f"{hrs/24:.1f}d"
                 except Exception: age_str = "?h"
-                pnl = (curr - entry) / entry * 100 if entry > 0 else 0
                 icon = "🟢" if pnl >= 0 else "🔴"
                 print(f"    {icon} {r['coin']:8s}  {pnl:+.1f}%  [{age_str}]  entry {_pfmt(entry)}  now {_pfmt(curr)}")
             except Exception: pass
@@ -457,15 +470,15 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
             print(f"\n  🎯  MOST VALUABLE SCANNER PICKS:")
             if longs:
                 print("    🚀 LONGS:")
-                for i, r in enumerate(longs[:5], 1):
+                for i, r in enumerate(longs, 1):
                     print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
             if shorts:
                 print("    📉 SHORTS:")
-                for i, r in enumerate(shorts[:5], 1):
+                for i, r in enumerate(shorts, 1):
                     print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
             if spots:
                 print("    💰 SPOTS:")
-                for i, r in enumerate(spots[:5], 1):
+                for i, r in enumerate(spots, 1):
                     print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
         else:
             print("\n  ℹ️  No high-conviction scanner picks this round.")
@@ -473,7 +486,7 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
     # ── Valuable Whale Rides ──
     if whale_rides:
         print(f"\n  🌊  VALUABLE WHALE RIDE CANDIDATES:")
-        for i, wr in enumerate(whale_rides[:5], 1):
+        for i, wr in enumerate(whale_rides, 1):
             sym = wr.get("symbol", "?")
             cyc = wr.get("cycle_number", "?")
             score = wr.get("hc_score", "?")

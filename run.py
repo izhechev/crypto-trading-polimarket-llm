@@ -544,7 +544,6 @@ def run_scan_cycle(
         try:
             groq_result = analyze_with_groq(
                 top10, fg, news_text,
-                pump_alerts=pump_alerts,
                 enrichment_text=combined_context,
                 per_coin_news=per_coin_news_pre,
                 already_open=_already_open_syms,
@@ -790,9 +789,9 @@ def main():
 
         import threading
         from src.utils.price_alerts import run_alert_loop
-        # alert_thread = threading.Thread(target=run_alert_loop, args=(60,), daemon=True, name="price-alerts")
-        # alert_thread.start()
-        # print("  Price alert monitor started (every 1h)")
+        alert_thread = threading.Thread(target=run_alert_loop, args=(15,), daemon=True, name="price-alerts")
+        alert_thread.start()
+        print("  Price alert monitor started (every 15 min)")
 
         # Run immediately, then every 3h (full scan) + every 24h (whale check)
         run_scan_cycle(exchange=args.exchange, debate=args.debate,
@@ -802,7 +801,7 @@ def main():
         scheduler.add_job(
             run_scan_cycle,
             trigger="interval",
-            hours=3,
+            hours=1,
             kwargs={"exchange": args.exchange, "debate": args.debate,
                     "run_stocks": False, "run_polymarket": False},
             id="crypto_cycle",
@@ -813,7 +812,7 @@ def main():
             minutes=15,
             id="whale_check",
         )
-        print(f"\n  Crypto scheduler running — full scan every 3h, whale check every 15m. Ctrl+C to stop.\n")
+        print(f"\n  Crypto scheduler running — full scan every 1h, whale check every 15m. Ctrl+C to stop.\n")
         try:
             scheduler.start()
         except KeyboardInterrupt:
