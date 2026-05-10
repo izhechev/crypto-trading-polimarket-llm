@@ -422,6 +422,16 @@ def close_whale_rider_position(sym: str, current_price: float, exit_reason: str 
         _write(rows)
 
 
+def log_scanner_results(top10: list[dict], fear_greed_value: int) -> None:
+    """Backwards compat alias — not used in the new strict strategy."""
+    pass
+
+
+def log_portfolio_results(holdings: list[dict]) -> None:
+    """Backwards compat alias."""
+    pass
+
+
 def log_price_history() -> None:
     """Append current prices to history file."""
     from src.connectors.coingecko import fetch_prices
