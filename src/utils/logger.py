@@ -258,12 +258,12 @@ def update_open_positions() -> None:
 
         order_type = row.get("recommended_order", "SPOT")
         is_short = order_type == "SHORT"
-        is_long = order_type == "LONG"
         
         base_pnl_pct = ((entry - usd) if is_short else (usd - entry)) / entry * 100
         
-        if is_long or is_short:
-            pnl_pct = base_pnl_pct * 10.0  # 10x leverage
+        # Apply 10x leverage to LONG and SHORT positions (but not SPOT)
+        if order_type in ("LONG", "SHORT"):
+            pnl_pct = base_pnl_pct * 10.0
         else:
             pnl_pct = base_pnl_pct
             

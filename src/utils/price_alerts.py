@@ -310,12 +310,16 @@ def check_price_alerts() -> None:
         except (ValueError, KeyError):
             continue
 
-        # ── Correct PnL calculation for SHORTs ──
-        is_short = row.get("recommended_order") == "SHORT"
-        if is_short:
-            pnl_pct = (entry - usd) / entry * 100
+        order_type = row.get("recommended_order", "SPOT")
+        is_short = order_type == "SHORT"
+        is_long = order_type == "LONG"
+        
+        base_pnl_pct = ((entry - usd) / entry * 100) if is_short else ((usd - entry) / entry * 100)
+        
+        if is_long or is_short:
+            pnl_pct = base_pnl_pct * 10.0  # 10x leverage
         else:
-            pnl_pct = (usd - entry) / entry * 100
+            pnl_pct = base_pnl_pct
 
         coin    = row.get("coin", "").upper()
         key     = _position_key(row)
