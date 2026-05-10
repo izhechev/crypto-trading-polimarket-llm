@@ -1887,13 +1887,13 @@ def run_smart_scanner(
 
             # Momentum stall cap: MACD bearish + trend neutral → score capped at 2
             if momentum_stall and raw_score > 2:
-                print(f"  ⚠️  {symbol} MOMENTUM STALL — score capped 2 (was {raw_score})")
+                # print(f"  ⚠️  {symbol} MOMENTUM STALL — score capped 2 (was {raw_score})")
                 raw_score = 2
 
             if circ_pct_val < 30.0:
                 supply_risk = "MEDIUM"
                 if raw_score > 3:
-                    print(f"  ⚠️  {symbol} circ supply {circ_pct_val:.0f}% MEDIUM — score capped 3 (was {raw_score})")
+                    # print(f"  ⚠️  {symbol} circ supply {circ_pct_val:.0f}% MEDIUM — score capped 3 (was {raw_score})")
                     raw_score = 3
                 circ_cap_reason = [f"circ supply {circ_pct_val:.0f}% MEDIUM (score capped 3 — HALF SIZE)"]
             else:
@@ -1961,8 +1961,9 @@ def run_smart_scanner(
                 and vm > 0.15
             )
             deep_dip_tb = 1 if deep_dip else 0
-            if deep_dip:
-                print(f"  ⭐ DEEP DIP: {symbol} — 7d {change_7d:.1f}%, RSI {ta.rsi_14:.1f}, MACD bullish")
+            # if deep_dip:
+            #     print(f"  ⭐ DEEP DIP: {symbol} — 7d {change_7d:.1f}%, RSI {ta.rsi_14:.1f}, MACD bullish")
+            #     pass
 
             _price_usd = coin.get("current_price", 0)
             results.append({
@@ -2000,7 +2001,7 @@ def run_smart_scanner(
             })
             rsi_str  = f"RSI={ta.rsi_14:.0f}" if ta.rsi_14 else "RSI=n/a"
             bb_str   = f"BB={ta.bollinger_position}" if ta.bollinger_position else "BB=n/a"
-            print(f" score={raw_score:+d}  {rsi_str}  {bb_str}  candles={len(ohlcv)}")
+            # print(f" score={raw_score:+d}  {rsi_str}  {bb_str}  candles={len(ohlcv)}")
         except Exception as _e:
             print(f" ERROR: {_e}")
 
@@ -2046,7 +2047,8 @@ def run_smart_scanner(
     approaching_tp = _build_approaching_tp_set(current_prices, threshold_pct=3.0)
     if approaching_tp:
         for sym, pct in approaching_tp.items():
-            print(f"  ⏳ {sym} approaching TP ({pct:.1f}% away) — excluded from new picks")
+            # print(f"  ⏳ {sym} approaching TP ({pct:.1f}% away) — excluded from new picks")
+            pass
         normal_results = [r for r in normal_results if r["symbol"].upper() not in approaching_tp]
 
     # ── Most Valuable Only ──

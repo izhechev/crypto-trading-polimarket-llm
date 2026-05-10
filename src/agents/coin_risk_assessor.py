@@ -338,11 +338,12 @@ def assess_coin_risks(
     flagged_news: dict[str, list[str]] = {}
     dilution_only = set(flagged_onchain) - set(flagged_serious)
     if dilution_only:
-        print(f"  ℹ️  {len(dilution_only)} dilution-only coin(s) — no news check (scoring flag only): "
-              f"{', '.join(sorted(dilution_only))}")
+        # print(f"  ℹ️  {len(dilution_only)} dilution-only coin(s) — no news check (scoring flag only): "
+        #       f"{', '.join(sorted(dilution_only))}")
+        pass
     if flagged_serious:
-        print(f"  📰 News check for {len(flagged_serious)} crash/panic/rug coin(s): "
-              f"{', '.join(flagged_serious)}")
+        # print(f"  📰 News check for {len(flagged_serious)} crash/panic/rug coin(s): "
+        #       f"{', '.join(flagged_serious)}")
         coin_map = {c.get("symbol","").upper(): c for c in to_assess}
         for sym, flags in flagged_serious.items():
             coin = coin_map.get(sym, {})
@@ -353,7 +354,8 @@ def assess_coin_risks(
                 hits = []
             flagged_news[sym] = hits
             if hits:
-                print(f"    ⚠️  {sym}: {len(hits)} scam mention(s) in news/Reddit")
+                # print(f"    ⚠️  {sym}: {len(hits)} scam mention(s) in news/Reddit")
+                pass
 
     # Step 4 — batch Groq verdict for coins with any flags
     verdicts: dict[str, dict] = {}
@@ -368,7 +370,8 @@ def assess_coin_risks(
             ]
             verdicts = _groq_verdict(batch, client)
         except Exception as e:
-            print(f"  [risk] Groq unavailable: {e}")
+            # print(f"  [risk] Groq unavailable: {e}")
+            pass
 
     # Step 5 — build RiskAssessment for all assessed coins
     for coin in to_assess:
@@ -390,7 +393,7 @@ def assess_coin_risks(
             )
             icon = {"DEAD_PROJECT":"💀","ACTIVE_SCAM":"🚨",
                     "MANIPULATED_REAL":"⚠️ ","SUSPICIOUS":"🔶","NORMAL":"✅"}.get(category, "❓")
-            print(f"  {icon} {sym}: {category} — {reasoning[:80]}")
+            # print(f"  {icon} {sym}: {category} — {reasoning[:80]}")
 
         results[sym] = ra
         cache[sym]   = ra
