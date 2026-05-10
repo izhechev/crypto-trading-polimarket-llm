@@ -2256,6 +2256,9 @@ def run_smart_scanner(
     for wr in valuable_wr:
         log_whale_ride(wr, fear_greed.get("value", 50))
 
+    # Final count of high-value picks
+    quality_count = len(top_longs) + len(top_shorts) + len(top_spots)
+
     return top10, pump_coins, all_whale_rides, quality_count, _catalysts
 
 
