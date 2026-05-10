@@ -449,36 +449,29 @@ def send_whale_ride_alerts(
         for line in hc_lines:
             print(line)
     
+    # ── High-Conviction Batch Message ─────────────────────────────────────────
     hc_msg = ""
     if hc_lines:
         hc_msg = "🔥 <b>HIGH-CONVICTION WHALE SIGNALS</b>\n" + \
                  "<pre>TICKER | mcap  | volM | v/mc | 24h%  | 7d%   | ATH% | score</pre>\n" + \
                  "\n".join(hc_lines) + "\n\n"
-    elif candidates:
-        # hc_msg = "❌ No high-conviction signals this round.\n\n"
-        pass
-
-    # ── Original Batch Logic (REMOVED generic list, only sending HC) ──────────
-    # Count total open positions — cap auto-opens at 50 total (Normal market)
+    
+    # ── Send Message ──
+    # Count total open positions for budget context
     _open_count = 0
     try:
         from src.utils.logger import _read as _log_read
         _open_count = sum(1 for r in _log_read() if r.get("status") == "OPEN")
-    except Exception:
-        pass
+    except Exception: pass
 
     is_neutral = fg_value >= 40
-    _MAX_TOTAL_POSITIONS = 50 if is_neutral else 30
-    _MAX_WHALE_AUTO      = 20 if is_neutral else 10
-    _auto_opened         = 0
-    fg_line  = f"\n⚠️ F&amp;G = {fg_value} ({'Neutral' if is_neutral else 'Fear'}) — {'Aggressive' if is_neutral else 'Conservative'} mode"
+    fg_line  = f"⚠️ F&amp;G = {fg_value} ({'Neutral' if is_neutral else 'Fear'}) — {'Aggressive' if is_neutral else 'Conservative'} mode"
 
-    # Only send message if there is actual High-Conviction content
     if hc_msg:
         batch_msg = (
             hc_msg +
-            f"🐋 <b>VALUABLE WHALE RIDES</b>{fg_line}\n"
-            + "\n  ⚠️ Manual trade only — invest $100 max per signal"
+            f"🐋 <b>VALUABLE WHALE RIDES</b>\n{fg_line}\n" +
+            "\n  ⚠️ Manual trade only — invest $100 max per signal"
         )
         try:
             send_telegram(batch_msg)

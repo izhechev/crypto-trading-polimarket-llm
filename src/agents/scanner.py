@@ -2232,87 +2232,38 @@ def run_smart_scanner(
     except Exception as _tg_e:
         print(f"  ⚠️  Telegram valuable summary failed: {_tg_e}")
 
-    # ── Auto-Log All Top Picks ──
-    from src.utils.logger import log_recommendation, log_whale_ride, _read as _log_read
-    
-    _all_rows = _log_read()
-    _open_syms = {
-        r.get("coin", "").upper()
-        for r in _all_rows
-        if r.get("status") == "OPEN"
-    }
-
-    # 1. Scanner Picks (Long/Short/Spot)
-    for r in top_longs + top_shorts + top_spots:
-        _sym = r["symbol"].upper()
-        if _sym in _open_syms:
-            continue # Skip already open
-            
-        # Use +10% TP and -10% SL for all, as requested
-        entry = r.get("price", 0)
-        if not entry: continue
-        
-        is_short = r["recommended_order"] == "SHORT"
-        if is_short:
-            # SHORT: TP is price DROP, SL is price RISE
-            tp = entry * 0.90
-            sl = entry * 1.10
-        else:
-            # LONG/SPOT: TP is price RISE, SL is price DROP
-            tp = entry * 1.10
-            sl = entry * 0.90
-
-        rec = {
-            "coin":        _sym,
-            "coin_id":     r["coin_id"],
-            "entry_price": round(entry, 8),
-            "stop_loss":   round(sl, 8),
-            "take_profit": round(tp, 8),
-            "timeframe":   "24h Window",
-            "reasoning":   f"Top {r['recommended_order']} Pick. Score {r['score']}.",
-            "recommended_order": r["recommended_order"],
-        }
-        log_recommendation(rec, fear_greed.get("value", 50))
-        _open_syms.add(_sym)
-
-    # 2. Valuable Whale Rides (Statistical filtering)
+    # Filter whale rides to return only those that meet conviction score
     def _get_wr_score(wr: dict) -> int:
         score = 0
         mcap = wr.get("market_cap", 0)
         ch7d = wr.get("change_7d", 0)
         cyc  = wr.get("cycle_number", 1)
-        
-        if cyc >= 2: score += 3  # Proven recurring pattern
-        if mcap < 50_000_000: score += 2  # Low cap = high potential
+        if cyc >= 2: score += 3
+        if mcap < 50_000_000: score += 2
         elif mcap < 150_000_000: score += 1
-        
-        if ch7d > 50: score += 1  # Recent momentum
+        if ch7d > 50: score += 1
         return score
 
     valuable_wr = []
     for wr in all_whale_rides:
-        _sym = wr.get("symbol", "").upper()
-        if _sym in _open_syms:
-            continue
-            
         wr["hc_score"] = _get_wr_score(wr)
-        # ONLY OPEN if proven (cycle >= 2) OR high statistical score (>= 3)
         if wr["hc_score"] >= 3 or wr.get("cycle_number", 0) >= 2:
-            log_whale_ride(wr, fear_greed.get("value", 50))
-            _open_syms.add(_sym)
             valuable_wr.append(wr)
 
-    # Final count of high-value picks for return
-    try:
-        quality_count = len(top_longs) + len(top_shorts) + len(top_spots)
-    except NameError:
-        quality_count = 0
+    # ── Final Return ──
+    # returns: (generic top 10, pump list, valuable whale rides, quality count, news catalysts, and specific categories)
+    quality_count = len(top_longs) + len(top_shorts) + len(top_spots)
 
-    return top10, pump_coins, valuable_wr, quality_count, _catalysts
+    # Bundle categories for run.py
+    categories = {
+        "longs":  top_longs,
+        "shorts": top_shorts,
+        "spots":  top_spots,
+    }
+    return top10, pump_coins, valuable_wr, quality_count, _catalysts, categories
 
 
-def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
-    """Helper to print a pick's details."""
+    def _print_pick(rank: int, r: dict, catalysts: dict) -> None:    """Helper to print a pick's details."""
     supply_tag   = "  [⚠️ MED SUPPLY — HALF SIZE]" if r.get("supply_risk") == "MEDIUM" else ""
     hold_tag      = "  [📌 OPEN — HOLD]" if r.get("_already_open") else ""
     print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  score: {r['score']} pts{supply_tag}{hold_tag}")
