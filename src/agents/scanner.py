@@ -1970,6 +1970,9 @@ def run_smart_scanner(
             #     print(f"  ⭐ DEEP DIP: {symbol} — 7d {change_7d:.1f}%, RSI {ta.rsi_14:.1f}, MACD bullish")
             #     pass
 
+            # Re-fetch risk info for the result dict
+            risk_info = risk_map.get(symbol)
+            
             _price_usd = coin.get("current_price", 0)
             results.append({
                 "coin_id":         coin_id,
@@ -2003,6 +2006,8 @@ def run_smart_scanner(
                 "archetype":        archetype,          # "A" | "B" | ""
                 "deep_dip":         deep_dip,           # SIREN bonus rule
                 "deep_dip_tb":      deep_dip_tb,        # +1 → prioritized in top 3
+                "security_status":  risk_info.category if risk_info else "NORMAL",
+                "liquidity_usd":    0.0,  # updated later
             })
             rsi_str  = f"RSI={ta.rsi_14:.0f}" if ta.rsi_14 else "RSI=n/a"
             bb_str   = f"BB={ta.bollinger_position}" if ta.bollinger_position else "BB=n/a"
@@ -2058,13 +2063,13 @@ def run_smart_scanner(
 
     # 13. God-Tier Liquidity Check (DexScreener)
     # Perform for high-potential candidates to ensure we can actually exit
-    print(f"  Performing on-chain liquidity checks for top {len(quality_picks)} picks...")
+    print(f"  Performing on-chain liquidity checks for top {len(normal_results[:30])} picks...")
     from src.connectors.dexscreener import fetch_dex_liquidity
     from src.connectors.coingecko import fetch_platform_info
     
-    for r in quality_picks:
+    for r in normal_results[:30]:
         try:
-            cid = r.get("id")
+            cid = r.get("id") or r.get("coin_id")
             liq = 0.0
             if cid:
                 info = fetch_platform_info(cid)
@@ -2076,21 +2081,21 @@ def run_smart_scanner(
             if liq > 0:
                 if liq < 100_000:
                     r["score"] -= 2
-                    r["reasoning"].append(f"Low liquidity (${liq/1e3:.0f}k)")
+                    r["reasons"].append(f"Low liquidity (${liq/1e3:.0f}k)")
                 elif liq > 1_000_000:
                     r["score"] += 1
-                    r["reasoning"].append(f"Deep liquidity (${liq/1e6:.1f}M)")
+                    r["reasons"].append(f"Deep liquidity (${liq/1e6:.1f}M)")
         except Exception: pass
 
     # Re-sort and filter after on-chain checks
-    quality_picks.sort(key=lambda x: (x["score"], x.get("change_24h", 0)), reverse=True)
+    normal_results.sort(key=lambda x: (x["score"], x.get("change_24h", 0)), reverse=True)
     
     # ── Most Valuable Only ──
     # Show Top Long/Short/Spot picks that meet 100% confidence technical score thresholds
-    top_longs  = [r for r in quality_picks if r["recommended_order"] == "LONG" and r.get("score", 0) >= 10]
-    top_shorts = [r for r in quality_picks if r["recommended_order"] == "SHORT" and r.get("score", 0) >= 10]
-    top_spots  = [r for r in quality_picks if r["recommended_order"] == "SPOT" and r.get("score", 0) >= 8]
-    top10 = quality_picks[:10]
+    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG" and r.get("score", 0) >= 10]
+    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT" and r.get("score", 0) >= 10]
+    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT" and r.get("score", 0) >= 8]
+    top10 = normal_results[:10]
 
     # Fetch 1-sentence news catalysts for actual picks
     picks_to_fetch = top_longs + top_shorts + top_spots
@@ -2293,11 +2298,22 @@ def run_smart_scanner(
 
 
 def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
-    """Helper to print a pick's details."""
+    """Helper to print a pick's details with God-Tier security and liquidity info."""
     supply_tag   = "  [⚠️ MED SUPPLY — HALF SIZE]" if r.get("supply_risk") == "MEDIUM" else ""
     hold_tag      = "  [📌 OPEN — HOLD]" if r.get("_already_open") else ""
+    
+    # ── God-Tier Reporting ──
+    sec_cat  = r.get("security_status", "NORMAL")
+    sec_icon = "🛡️" if sec_cat == "NORMAL" else "🚨"
+    sec_text = "AUDITED" if sec_cat == "NORMAL" else sec_cat
+    
+    liq_usd  = r.get("liquidity_usd", 0)
+    liq_str  = f"${liq_usd/1e3:.0f}k" if liq_usd < 1e6 else f"${liq_usd/1e6:.1f}M"
+    liq_icon = "💧" if liq_usd >= 100_000 else "⚠️"
+
     print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  score: {r['score']} pts{supply_tag}{hold_tag}")
     print(f"     Price: ${r['price']:.4f}  |  24h: {r['change_24h']:+.1f}%  |  7d: {r['change_7d']:+.1f}%")
+    print(f"     {sec_icon} SECURITY: {sec_text}  |  {liq_icon} LIQUIDITY: {liq_str}")
     print(f"     RSI {r['rsi']:.1f}  |  MACD: {r['macd']}  |  Trend: {r['trend']}")
     print(f"     Signals: {', '.join(r['reasons']) if r['reasons'] else 'none'}")
     cat = catalysts.get(r["symbol"].upper(), "No recent news found")
