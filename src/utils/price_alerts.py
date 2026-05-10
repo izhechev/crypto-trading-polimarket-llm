@@ -310,7 +310,13 @@ def check_price_alerts() -> None:
         except (ValueError, KeyError):
             continue
 
-        pnl_pct = (usd - entry) / entry * 100
+        # ── Correct PnL calculation for SHORTs ──
+        is_short = row.get("recommended_order") == "SHORT"
+        if is_short:
+            pnl_pct = (entry - usd) / entry * 100
+        else:
+            pnl_pct = (usd - entry) / entry * 100
+
         coin    = row.get("coin", "").upper()
         key     = _position_key(row)
         fired   = state.setdefault(key, set())
@@ -339,8 +345,9 @@ def check_price_alerts() -> None:
             row["exit_price"] = round(usd, 6)
             row["close_date"] = _now_str_alert
             dirty_csv = True
-            print(f"  ✅ WIN: {row['coin']} {pnl_pct:+.1f}% within {hours_open_alert:.1f}h")
-            _alert(f"✅ <b>WIN +10% — {row['coin']}</b>\n"
+            side = "SHORT" if is_short else "LONG"
+            print(f"  ✅ WIN ({side}): {row['coin']} {pnl_pct:+.1f}% within {hours_open_alert:.1f}h")
+            _alert(f"✅ <b>WIN +10% ({side}) — {row['coin']}</b>\n"
                    f"  PnL: {pnl_pct:+.1f}% after {hours_open_alert:.1f}h\n"
                    f"  ✅ Position closed as WIN.")
             continue
@@ -351,7 +358,8 @@ def check_price_alerts() -> None:
             row["exit_price"] = round(usd, 6)
             row["close_date"] = _now_str_alert
             dirty_csv = True
-            print(f"  ⏰ LOSS (24h timeout): {row['coin']} {pnl_pct:+.1f}% after {hours_open_alert:.1f}h")
+            side = "SHORT" if is_short else "LONG/SPOT"
+            print(f"  ⏰ LOSS ({side} 24h timeout): {row['coin']} {pnl_pct:+.1f}% after {hours_open_alert:.1f}h")
             _alert(f"⏰ <b>LOSS (24h Timeout) — {row['coin']}</b>\n"
                    f"  PnL: {pnl_pct:+.1f}% after {hours_open_alert:.1f}h\n"
                    f"  ❌ Position closed as LOSS.")

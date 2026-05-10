@@ -2251,12 +2251,23 @@ def run_smart_scanner(
         # Use +10% TP and -10% SL for all, as requested
         entry = r.get("price", 0)
         if not entry: continue
+        
+        is_short = r["recommended_order"] == "SHORT"
+        if is_short:
+            # SHORT: TP is price DROP, SL is price RISE
+            tp = entry * 0.90
+            sl = entry * 1.10
+        else:
+            # LONG/SPOT: TP is price RISE, SL is price DROP
+            tp = entry * 1.10
+            sl = entry * 0.90
+
         rec = {
             "coin":        _sym,
             "coin_id":     r["coin_id"],
             "entry_price": round(entry, 8),
-            "stop_loss":   round(entry * 0.90, 8),
-            "take_profit": round(entry * 1.10, 8),
+            "stop_loss":   round(sl, 8),
+            "take_profit": round(tp, 8),
             "timeframe":   "24h Window",
             "reasoning":   f"Top {r['recommended_order']} Pick. Score {r['score']}.",
             "recommended_order": r["recommended_order"],
