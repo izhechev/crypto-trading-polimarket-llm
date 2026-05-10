@@ -2050,10 +2050,10 @@ def run_smart_scanner(
         normal_results = [r for r in normal_results if r["symbol"].upper() not in approaching_tp]
 
     # ── Most Valuable Only ──
-    # Show only HIGH score picks (Score ≥ 8) and separate Long/Short/Spot
-    top_longs  = [r for r in normal_results if r["score"] >= 8 and r["recommended_order"] == "LONG"][:5]
-    top_shorts = [r for r in normal_results if r["score"] >= 8 and r["recommended_order"] == "SHORT"][:5]
-    top_spots  = [r for r in normal_results if r["score"] >= 8 and r["recommended_order"] == "SPOT"][:5]
+    # Show Top Long/Short/Spot picks (no score gate, user wants "top" of each)
+    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG"][:5]
+    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT"][:5]
+    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT"][:5]
     top10 = normal_results[:10]
 
     # Fetch 1-sentence news catalysts for actual picks
@@ -2066,7 +2066,7 @@ def run_smart_scanner(
     except Exception:
         pass
 
-    print(f"\n  MOST VALUABLE OPPORTUNITIES (Score ≥ 8)\n" + "=" * 60)
+    print(f"\n  MOST VALUABLE OPPORTUNITIES (TOP PICKS BY CATEGORY)\n" + "=" * 60)
     
     if top_longs:
         print(f"\n  🚀  TOP LONG PICKS")
@@ -2219,11 +2219,36 @@ def run_smart_scanner(
     except Exception as _wr_e:
         print(f"  ⚠️  Whale rider module error: {_wr_e}")
 
-    # ── Telegram summary: LONG/SHORT sections ────────
+    # ── Telegram summary ────────
     try:
-        _send_telegram_valuable(top_longs, top_shorts, all_whale_rides, fear_greed)
+        _send_telegram_valuable(top_longs, top_shorts, top_spots, all_whale_rides, fear_greed)
     except Exception as _tg_e:
         print(f"  ⚠️  Telegram valuable summary failed: {_tg_e}")
+
+    # ── Auto-Log All Top Picks ──
+    from src.utils.logger import log_recommendation, log_whale_ride
+    
+    # 1. Scanner Picks (Long/Short/Spot)
+    for r in top_longs + top_shorts + top_spots:
+        # Use +10% TP and -10% SL for all, as requested
+        entry = r.get("price", 0)
+        if not entry: continue
+        rec = {
+            "coin":        r["symbol"],
+            "coin_id":     r["coin_id"],
+            "entry_price": round(entry, 8),
+            "stop_loss":   round(entry * 0.90, 8),
+            "take_profit": round(entry * 1.10, 8),
+            "timeframe":   "24h Window",
+            "reasoning":   f"Top {r['recommended_order']} Pick. Score {r['score']}.",
+            "recommended_order": r["recommended_order"],
+        }
+        log_recommendation(rec, fear_greed.get("value", 50))
+
+    # 2. Valuable Whale Rides
+    valuable_wr = [wr for wr in all_whale_rides if wr.get("cycle_number", 0) >= 1]
+    for wr in valuable_wr:
+        log_whale_ride(wr, fear_greed.get("value", 50))
 
     return top10, pump_coins, all_whale_rides, quality_count, _catalysts
 

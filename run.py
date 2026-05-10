@@ -821,130 +821,11 @@ def run_scan_cycle(
                 )
 
     # Build Telegram crypto section — unified TOP 3 format.
-    # Slots 1..N: genuine new Groq picks (NEW ENTRY) — only as many as Groq returned.
-    # Slots N+1..3: best open positions padded as HOLD (sorted by TP proximity).
-    # Never invent new picks just to fill 3 slots.
-    display_recs = recs_for_display or []
+    # DISABLED: scanner.py now sends a combined Long/Short/Spot/Whale report.
+    # display_recs = recs_for_display or []
+    # ... (skipping all old msg building)
+    pass
 
-    # Bug 1 fix: skip non-fallback recs where entry_price is missing or zero
-    _valid_display = []
-    for _dr in display_recs:
-        if _dr.get("_groq_fallback"):
-            _valid_display.append(_dr)
-            continue
-        _ep = _dr.get("entry_price")
-        if _ep is None or (isinstance(_ep, (int, float)) and _ep <= 0):
-            print(f"  ⚠️  Skipped {_dr.get('coin', '?')}: price unavailable")
-            continue
-        _valid_display.append(_dr)
-    display_recs = _valid_display
-
-    # Open positions sorted by closeness to TP (ascending = closest first)
-    open_portfolio_rows = [
-        r for r in _log_rows
-        if r.get("type", "") in ("SCANNER", "") and r.get("status") == "OPEN"
-    ]
-    def _pct_to_tp(row):
-        try:
-            tp = float(row.get("take_profit") or 0)
-            cp = float(row.get("current_price") or row.get("entry_price") or 0)
-            if tp > 0 and cp > 0:
-                return (tp - cp) / tp * 100
-        except (ValueError, TypeError):
-            pass
-        return 999.0
-    open_portfolio_rows.sort(key=_pct_to_tp)
-
-    # Exclude already-shown new picks from HOLD padding
-    _new_pick_syms = {r.get("coin", "").upper() for r in display_recs}
-    hold_candidates = [r for r in open_portfolio_rows if r.get("coin", "").upper() not in _new_pick_syms]
-
-    def _fmt_price(v):
-        if not isinstance(v, (int, float)):
-            return str(v)
-        if v == 0:
-            return "$0"
-        if v >= 1:
-            return f"${v:,.2f}"
-        if v >= 0.01:
-            return f"${v:.4f}"
-        return f"${v:.8f}"
-
-    if display_recs or open_portfolio_rows:
-        fg_value_msg = fg.get("value", "?")
-        fg_label_msg = fg.get("label", "?")
-        is_caution = any(r.get("_caution_buy") for r in display_recs)
-
-        # Header label
-        n_new = len(display_recs)
-        _is_fallback = _groq_failed and any(r.get("_groq_fallback") for r in display_recs)
-        if skip_groq or n_new == 0:
-            header_label = "PORTFOLIO UPDATE"
-        elif _is_fallback:
-            header_label = f"TOP {n_new} SCANNER (GROQ DOWN)"
-        elif is_caution:
-            header_label = "⚠️ CAUTION BUY"
-        else:
-            header_label = f"TOP {n_new} BUY{'S' if n_new != 1 else ''}"
-
-        lines_msg = [
-            f"<b>CryptoAdvisor — {header_label}</b>\n",
-            f"Fear &amp; Greed: {fg_value_msg}/100 ({fg_label_msg})\n",
-        ]
-
-        if skip_groq:
-            lines_msg.append(f"<i>⚠️ No new picks — all top coins already OPEN</i>\n")
-        elif _is_fallback:
-            lines_msg.append(f"<i>⚠️ Groq rate-limited — showing raw scanner top 3 (no SL/TP — check manually)</i>\n")
-        elif n_new == 0:
-            lines_msg.append(f"<i>⚠️ Groq found no new entries this cycle</i>\n")
-        elif is_caution:
-            lines_msg.append("<i>No HIGH confidence picks — reduce position size in extreme fear</i>\n")
-
-        slot = 1
-        # New picks first
-        for rec in display_recs:
-            sym  = rec.get("coin", "?")
-            ep   = rec.get("entry_price")
-            conf = (rec.get("confidence") or "?").upper()
-            icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(conf, "⚪")
-            if rec.get("_groq_fallback"):
-                # Fallback pick: show scanner score + news headline
-                _score_str = rec.get("reasoning", "")
-                _news_headline = rec.get("_fallback_news", "")
-                _news_line = f"\n   📰 {_news_headline}" if _news_headline else ""
-                lines_msg.append(
-                    f"{slot}. <b>{sym}</b>  ⚪ SCANNER  {_score_str}{_news_line}"
-                )
-            else:
-                lines_msg.append(
-                    f"{slot}. <b>{sym}</b>  {icon} NEW ENTRY  entry {_fmt_price(ep)}"
-                )
-            slot += 1
-
-        # Pad remaining slots up to 10 with best open positions (HOLD)
-        for row in hold_candidates:
-            if slot > 10:
-                break
-            coin    = row.get("coin", "?")
-            pnl     = row.get("pnl_pct", "?")
-            pnl_str = f"{float(pnl):+.1f}%" if pnl not in ("?", "", None) else "?"
-            pct_left = _pct_to_tp(row)
-            tp_tag  = f" ⏳ {pct_left:.1f}% to TP" if pct_left < 5 else ""
-            lines_msg.append(
-                f"{slot}. <b>{coin}</b>  ✅ HOLD  {pnl_str}{tp_tag}"
-            )
-            slot += 1
-
-        msg = "\n".join(lines_msg)
-
-        if debate_verdict and display_recs:
-            verdict_emoji = {"BUY": "🟢", "SKIP": "🔴", "WAIT": "🟡"}.get(
-                debate_verdict.get("verdict", ""), "⚪")
-            msg += (
-                f"\n\n{verdict_emoji} Debate: {debate_verdict.get('verdict', '?')} "
-                f"({debate_verdict.get('confidence', 0):.0%})"
-            )
 
     # Polymarket Advisor
     poly_picks: list[dict] = []
@@ -1198,9 +1079,9 @@ def main():
         # Start price alert monitor — checks every 15min for milestone/proximity alerts
         import threading
         from src.utils.price_alerts import run_alert_loop
-        # alert_thread = threading.Thread(target=run_alert_loop, args=(15,), daemon=True, name="price-alerts")
-        # alert_thread.start()
-        # print("  Price alert monitor started (every 15 min)")
+        alert_thread = threading.Thread(target=run_alert_loop, args=(15,), daemon=True, name="price-alerts")
+        alert_thread.start()
+        print("  Price alert monitor started (every 15 min)")
 
         # Run immediately, then every 3h (full scan) + every 24h (whale check)
         run_scan_cycle(exchange=args.exchange, debate=args.debate)

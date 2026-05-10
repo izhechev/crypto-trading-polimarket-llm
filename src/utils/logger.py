@@ -1350,78 +1350,51 @@ def update_open_positions() -> None:
 
         _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-        # Hard -10% SL floor — close any scanner position bleeding past -10%
-        if pnl_pct <= -10.0:
-            row["status"]     = "LOSS"
-            row["exit_price"] = round(usd, 6)
-            row["close_date"] = _now_str
-            closed += 1
-            print(f"  🛑 HARD -10% SL: {row['coin']} {pnl_pct:+.1f}% → LOSS")
-            continue
+        # ── 24h Window Strategy ───────────────────────────────────────────
+        # WIN: hit +10% within 24h.
+        # LOSS: 24h passed and didn't hit +10%.
 
-        # Hard 24h max hold — close all scanner positions unconditionally after 24h
+        _now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        
+        # Check if 24h passed
         try:
             entry_dt  = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
             hours_open = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
-            if hours_open >= 24.0:
-                _te_status = "WIN" if pnl_pct > 0 else "LOSS"
-                row["status"]     = _te_status
-                row["exit_price"] = round(usd, 6)
-                row["close_date"] = _now_str
-                closed += 1
-                print(f"  ⏰ SCANNER 24h: {row['coin']} {pnl_pct:+.1f}% after {hours_open:.0f}h → {_te_status}")
-                continue
         except Exception:
-            pass
+            hours_open = 0.0
 
-        # Close at +10% — no trailing SL, lock profit immediately
-        _reasoning = row.get("reasoning", "")
-        if pnl_pct >= 9.5 and "[WIN_10]" not in _reasoning:
+        # Close condition 1: Hit +10% (WIN)
+        if pnl_pct >= 10.0:
             row["status"]     = "WIN"
             row["exit_price"] = round(usd, 6)
             row["close_date"] = _now_str
-            row["reasoning"]  = _reasoning + " [WIN_10]"
             closed += 1
             new_wins.append(row)
-            print(f"  ✅ +10% WIN CLOSE: {row['coin']} {pnl_pct:+.1f}% — locked as WIN")
+            print(f"  ✅ WIN: {row['coin']} {pnl_pct:+.1f}% within {hours_open:.1f}h")
             try:
                 from src.utils.telegram import send_telegram as _tg
-                _tg(f"✅ <b>+10% WIN — {row['coin']}</b>\n"
-                    f"  Position at {pnl_pct:+.1f}% → closed as WIN.\n"
-                    f"  <b>Profit locked. No more risk.</b>")
+                _tg(f"✅ <b>WIN +10% — {row['coin']}</b>\n"
+                    f"  PnL: {pnl_pct:+.1f}% after {hours_open:.1f}h\n"
+                    f"  ✅ Position closed as WIN.")
             except Exception:
                 pass
             continue
 
-        # Extreme fear auto-close: F&G < 30 → take any profit >= +10% immediately
-        if _fg_value < 30 and pnl_pct >= 9.5:
-            row["status"]     = "WIN"
-            row["exit_price"] = round(usd, 6)
-            row["close_date"] = _now_str
-            closed += 1
-            new_wins.append(row)
-            print(f"  💰 EXTREME FEAR CLOSE: {row['coin']} {pnl_pct:+.1f}% locked (F&G={_fg_value})")
-            try:
-                from src.utils.telegram import send_telegram as _tg
-                _tg(f"💰 <b>EXTREME FEAR CLOSE — {row['coin']}</b>\n"
-                    f"  F&amp;G = {_fg_value} (extreme fear)\n"
-                    f"  Profit locked: {pnl_pct:+.1f}%\n"
-                    f"  ✅ Position closed automatically.")
-            except Exception:
-                pass
-            continue
-
-        if tp > 0 and usd >= tp:
-            row["status"]     = "WIN"
-            row["exit_price"] = round(usd, 6)
-            row["close_date"] = _now_str
-            closed += 1
-            new_wins.append(row)
-        elif sl > 0 and usd <= sl:
+        # Close condition 2: 24h timeout (LOSS unless already hit +10%)
+        if hours_open >= 24.0:
             row["status"]     = "LOSS"
             row["exit_price"] = round(usd, 6)
             row["close_date"] = _now_str
             closed += 1
+            print(f"  ⏰ LOSS (24h timeout): {row['coin']} {pnl_pct:+.1f}% after {hours_open:.1f}h")
+            try:
+                from src.utils.telegram import send_telegram as _tg
+                _tg(f"⏰ <b>LOSS (24h Timeout) — {row['coin']}</b>\n"
+                    f"  PnL: {pnl_pct:+.1f}% after {hours_open:.1f}h\n"
+                    f"  ❌ Position closed as LOSS.")
+            except Exception:
+                pass
+            continue
 
     _write(rows)
     # if closed:

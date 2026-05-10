@@ -320,183 +320,42 @@ def check_price_alerts() -> None:
         row["pnl_pct"]       = str(round(pnl_pct, 2))
         dirty_csv = True
 
-        # ── Whale ride: house-money system ───────────────────────────────
-        if row.get("type") == "WHALE_RIDE":
-            _SCORES         = {25: 1, 50: 2, 100: 3, 150: 3, 200: 4}
-            reasoning       = row.get("reasoning", "")
-            is_pr           = "PRINCIPAL_RECOVERED" in reasoning
-            _peak_key       = f"{key}_peak"
+        # ── 24h Window Strategy for ALL positions ────────────────────────
+        # WIN: hit +10% within 24h.
+        # LOSS: 24h passed and didn't hit +10%.
+        
+        _now_str_alert = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        
+        # Check if 24h passed
+        try:
+            entry_dt_alert = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+            hours_open_alert = (datetime.now(timezone.utc) - entry_dt_alert).total_seconds() / 3600
+        except Exception:
+            hours_open_alert = 0.0
 
-            # Time-based expiry: close when max_hold_hours elapsed.
-            # Serial scams are force-closed regardless of milestone/principal state.
-            import re as _re_ta
-            _now_str_ta = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            _is_scam    = "SERIAL SCAM" in reasoning
-            try:
-                _entry_dt  = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-                _hrs_open  = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600
-                _mh        = _re_ta.search(r"max_hold:\s*(\d+)h", reasoning)
-                _max_hold  = int(_mh.group(1)) if _mh else 24
-                _expired   = _hrs_open >= _max_hold
-                # Serial scams: force close if expired, skip if not
-                # Non-scams: close only if not already house-money managed
-                if _expired and "time_expired" not in fired and (_is_scam or not is_pr):
-                    _exp_status = "WIN" if pnl_pct > 0 else "LOSS"
-                    _scam_tag   = " ⚠️ SERIAL SCAM" if _is_scam else ""
-                    _diag = _whale_failure_diagnosis(pnl_pct, reasoning, exit_type="expired")
-                    _diag_str = f"\n  {_diag}" if _diag else ""
-                    _alert(f"⏰ {coin} expired ({_hrs_open:.0f}h/{_max_hold}h) {pnl_pct:+.1f}% → {_exp_status}  ${usd:.4f}{_scam_tag}{_diag_str}")
-                    row["status"]     = _exp_status
-                    row["exit_price"] = str(round(usd, 8))
-                    row["close_date"] = _now_str_ta
-                    row["pnl_pct"]    = str(round(pnl_pct, 2))
-                    fired.add("time_expired")
-                    dirty_csv = True
-                    print(f"  [time-expire] {coin} closed {_exp_status} {pnl_pct:+.1f}% after {_hrs_open:.0f}h{_scam_tag}")
-                    continue
-            except Exception:
-                pass
+        # Close condition 1: Hit +10% (WIN)
+        if pnl_pct >= 10.0:
+            row["status"]     = "WIN"
+            row["exit_price"] = round(usd, 6)
+            row["close_date"] = _now_str_alert
+            dirty_csv = True
+            print(f"  ✅ WIN: {row['coin']} {pnl_pct:+.1f}% within {hours_open_alert:.1f}h")
+            _alert(f"✅ <b>WIN +10% — {row['coin']}</b>\n"
+                   f"  PnL: {pnl_pct:+.1f}% after {hours_open_alert:.1f}h\n"
+                   f"  ✅ Position closed as WIN.")
+            continue
 
-            # Pre-milestone: hard SL at -15%
-            if not is_pr and pnl_pct <= -15.0 and "pre_sl_fired" not in fired:
-                _diag = _whale_failure_diagnosis(pnl_pct, reasoning, exit_type="sl")
-                _diag_str = f"\n  {_diag}" if _diag else ""
-                _alert(f"🛑 {coin} -15% SL at ${usd:.4f} — WHALE_RIDE closed LOSS (pre-milestone){_diag_str}")
-                row["status"]     = "LOSS"
-                row["exit_price"] = str(round(usd, 8))
-                row["close_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                row["pnl_pct"]    = round(pnl_pct, 2)
-                fired.add("pre_sl_fired")
-                dirty_csv = True
-                continue
-
-            # Post-milestone: trailing stop 25% below peak, hard floor at entry
-            if is_pr and "house_closed" not in fired:
-                peak_price  = state.get(_peak_key, entry)
-                if usd > peak_price:
-                    state[_peak_key] = usd
-                    peak_price = usd
-                trailing_sl = max(entry, round(peak_price * 0.75, 8))
-                row["stop_loss"] = str(trailing_sl)
-                dirty_csv = True
-
-                if usd <= trailing_sl:
-                    _close_pct = (trailing_sl - entry) / entry * 100
-                    _alert(
-                        f"🔔 {coin} HOUSE MONEY closed at ${usd:.4f} "
-                        f"(trail SL ${trailing_sl:.4f} = +{_close_pct:.1f}% from entry)"
-                    )
-                    row["status"]     = "WIN"
-                    row["exit_price"] = str(round(usd, 8))
-                    row["close_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                    row["pnl_pct"]    = round(pnl_pct, 2)
-                    fired.add("house_closed")
-                    dirty_csv = True
-                    continue
-
-            # Milestone firing LOW→HIGH so +25% fires first and sets PRINCIPAL_RECOVERED
-            for threshold, msg_tmpl in sorted(_WHALE_MILESTONES, key=lambda x: x[0]):
-                label = f"whale_{threshold:.0f}"
-                if pnl_pct < threshold or label in fired:
-                    continue
-
-                pct   = int(threshold)
-                score = _SCORES.get(pct, "")
-
-                # CSV-backed deduplication: if a milestone record already exists in the
-                # CSV for this position+threshold, re-sync fired set and skip the alert.
-                # This guards against alert_state.json being reset/corrupted between cycles.
-                _ms_in_csv = any(
-                    r.get("type") == "WHALE_MILESTONE"
-                    and r.get("coin", "").upper() == coin
-                    and r.get("date", "") == row.get("date", "")
-                    and str(r.get("pnl_pct", "")) == str(float(pct))
-                    for r in rows
-                )
-                if _ms_in_csv:
-                    fired.add(label)
-                    continue
-
-                msg = msg_tmpl.format(coin=coin, price=_pfmt(usd), pnl=pnl_pct)
-                _alert(msg)
-                fired.add(label)
-                dirty_csv = True
-
-                # +25%: recover principal → set hard-floor SL + tag reasoning
-                if threshold == 25.0 and not is_pr:
-                    row["reasoning"] = (reasoning + " PRINCIPAL_RECOVERED").strip()
-                    row["stop_loss"] = str(entry)
-                    state[_peak_key] = usd
-                    reasoning = row["reasoning"]
-                    is_pr = True
-
-                flag  = f"[MILESTONE_{pct}]"
-                if flag not in row.get("reasoning", ""):
-                    row["reasoning"] = (row.get("reasoning", "") + f" {flag}").strip()
-
-                # Log WIN record for this milestone
-                try:
-                    _entry_f  = float(row.get("entry_price") or 0)
-                    _ms_price = round(_entry_f * (1 + pct / 100), 8) if _entry_f > 0 else round(usd, 8)
-                except (ValueError, TypeError):
-                    _ms_price = round(usd, 8)
-                _ms = {
-                    "date":          row.get("date", ""),
-                    "type":          "WHALE_MILESTONE",
-                    "coin":          row.get("coin", ""),
-                    "coin_id":       row.get("coin_id", ""),
-                    "entry_price":   row.get("entry_price", ""),
-                    "stop_loss":     "",
-                    "take_profit":   "",
-                    "status":        "WIN",
-                    "exit_price":    _ms_price,
-                    "close_date":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-                    "pnl_pct":       float(pct),
-                    "current_price": round(usd, 8),
-                    "price_eur":     "",
-                    "timeframe":     "",
-                    "fear_greed":    row.get("fear_greed", ""),
-                    "reasoning":     f"[WHALE_MILESTONE +{pct}% / {score}pt] Partial win — position stays open",
-                    "groq_rank":     score,
-                    "qualifier":     "WHALE_RIDE",
-                    "key_signal":    "",
-                }
-                rows.append(_ms)
-                print(f"  [milestone] {coin} +{pct}% ({score}pt) WIN record logged immediately")
-
-        # ── Normal scanner picks: hard closes + proximity alerts ────────
-        else:
-            _now_str_sc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-            # Hard -10% SL floor — close immediately, don't wait for update_open_positions
-            if pnl_pct <= -10.0 and "scanner_closed" not in fired:
-                # _alert(f"🛑 {coin} -10% SL at ${usd:.4f} — SCANNER closed LOSS ({pnl_pct:+.1f}%)")
-                row["status"]     = "LOSS"
-                row["exit_price"] = str(round(usd, 8))
-                row["close_date"] = _now_str_sc
-                row["pnl_pct"]    = str(round(pnl_pct, 2))
-                fired.add("scanner_closed")
-                dirty_csv = True
-                continue
-
-            # Hard 24h max hold — close unconditionally after 24h
-            try:
-                _entry_dt_sc = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-                _hrs_sc = (datetime.now(timezone.utc) - _entry_dt_sc).total_seconds() / 3600
-            except Exception:
-                _hrs_sc = 0.0
-            if _hrs_sc >= 24.0 and "scanner_closed" not in fired:
-                _te_status_sc = "WIN" if pnl_pct > 0 else "LOSS"
-                # _alert(
-                #     f"⏰ {coin} 24h timeout {pnl_pct:+.1f}% → {_te_status_sc}  ${usd:.4f}"
-                # )
-                row["status"]     = _te_status_sc
-                row["exit_price"] = str(round(usd, 8))
-                row["close_date"] = _now_str_sc
-                row["pnl_pct"]    = str(round(pnl_pct, 2))
-                fired.add("scanner_closed")
-                dirty_csv = True
-                continue
+        # Close condition 2: 24h timeout (LOSS unless already hit +10%)
+        if hours_open_alert >= 24.0:
+            row["status"]     = "LOSS"
+            row["exit_price"] = round(usd, 6)
+            row["close_date"] = _now_str_alert
+            dirty_csv = True
+            print(f"  ⏰ LOSS (24h timeout): {row['coin']} {pnl_pct:+.1f}% after {hours_open_alert:.1f}h")
+            _alert(f"⏰ <b>LOSS (24h Timeout) — {row['coin']}</b>\n"
+                   f"  PnL: {pnl_pct:+.1f}% after {hours_open_alert:.1f}h\n"
+                   f"  ❌ Position closed as LOSS.")
+            continue
 
             # Approaching TP: pnl >= +8%  (2% before TP of +10%)
             if pnl_pct >= _TP_ALERT_PNL and "near_tp" not in fired:
