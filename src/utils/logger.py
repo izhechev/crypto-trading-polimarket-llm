@@ -447,6 +447,16 @@ def log_portfolio_results(holdings: list[dict]) -> None:
     pass
 
 
+def update_groq_rank(coin: str, groq_rank: int, qualifier: str, key_signal: str) -> None:
+    """Backwards compat alias."""
+    pass
+
+
+def update_whale_rank(coin: str, groq_rank: int, qualifier: str, key_signal: str) -> None:
+    """Backwards compat alias."""
+    pass
+
+
 def log_price_history() -> None:
     """Append current prices to history file."""
     from src.connectors.coingecko import fetch_prices
