@@ -554,47 +554,58 @@ def run_scan_cycle(
         except Exception as e:
             print(f"  ⚠️  Groq failed: {e}")
 
-    # ── High-Conviction Best Picks ──
-    # ONLY show and log BUY signals with confidence >= 50% (MEDIUM+)
-    best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.5]
+    # ── Extreme High-Conviction Filtering ──
+    # User requested aiming for "100% winrate" -> ONLY log the absolute best.
+    # Requires Groq BUY verdict AND HIGH confidence (>= 0.8).
+    best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.8]
     
     if best_picks:
-        print_header("HIGH-CONVICTION OPPORTUNITIES")
+        print_header("EXTREME HIGH-CONVICTION OPPORTUNITIES")
         for i, p in enumerate(best_picks, 1):
             _sym  = p["coin"].upper()
             _side = p.get("recommended_order", "SPOT")
             _conf = p.get("confidence", "LOW")
-            print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}) | Price: ${p.get('entry_price', 0):.4f}")
-            print(f"     💬 {p.get('reasoning', '')[:120]}...")
+            
+            # Additional safety check: only open if scanner score was very high
+            # (Long/Short >= 8, Spot >= 6)
+            _score = p.get("scanner_score", 0)
+            _meets_extreme_score = (_side in ("LONG", "SHORT") and _score >= 8) or (_side == "SPOT" and _score >= 6)
 
-            if _sym not in _already_open_syms:
-                _ep = float(p.get("entry_price") or 0)
-                _cid = p.get("coin_id")
-                # CRITICAL: ensure coin_id is present for price updates
-                if not _cid:
-                    matched = next((r for r in top10 if r["symbol"].upper() == _sym), None)
-                    if matched: _cid = matched["coin_id"]
+            if _meets_extreme_score:
+                print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}, Score: {_score}) | Price: ${p.get('entry_price', 0):.4f}")
+                print(f"     💬 {p.get('reasoning', '')[:120]}...")
 
-                if _ep > 0 and _cid:
-                    if _side == "SHORT": _tp, _sl = _ep * 0.90, _ep * 1.10
-                    else: _tp, _sl = _ep * 1.10, _ep * 0.90
-                    
-                    log_recommendation({
-                        "coin": _sym, "coin_id": _cid,
-                        "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
-                        "timeframe": "24h Window", "reasoning": f"BUY Conf: {_conf}",
-                        "recommended_order": _side,
-                    }, fg.get("value", 50))
-                    _already_open_syms.add(_sym)
+                if _sym not in _already_open_syms:
+                    _ep = float(p.get("entry_price") or 0)
+                    _cid = p.get("coin_id")
+                    if not _cid:
+                        matched = next((r for r in top10 if r["symbol"].upper() == _sym), None)
+                        if matched: _cid = matched["coin_id"]
+
+                    if _ep > 0 and _cid:
+                        if _side == "SHORT": _tp, _sl = _ep * 0.90, _ep * 1.10
+                        else: _tp, _sl = _ep * 1.10, _ep * 0.90
+                        
+                        log_recommendation({
+                            "coin": _sym, "coin_id": _cid,
+                            "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
+                            "timeframe": "24h Window", "reasoning": f"Extreme Conviction BUY. Conf: {_conf}, Score: {_score}.",
+                            "recommended_order": _side,
+                        }, fg.get("value", 50))
+                        _already_open_syms.add(_sym)
+            else:
+                print(f"  ❌ {_sym} rejected: high LLM confidence but technical score ({_score}) too low for extreme mode.")
     else:
-        print("\n  ℹ️  No high-conviction BUY opportunities this cycle.")
+        print("\n  ℹ️  No extreme high-conviction BUY opportunities this cycle.")
 
     # Auto-log valuable Whale Rides
+    # Only log if they meet an extreme threshold (Cycle >= 3 or Score >= 5)
     for wr in whale_rides:
         _sym = wr.get("symbol", "").upper()
         if _sym not in _already_open_syms:
-            log_whale_ride(wr, fg.get("value", 50))
-            _already_open_syms.add(_sym)
+            if wr.get("cycle_number", 0) >= 3 or wr.get("hc_score", 0) >= 5:
+                log_whale_ride(wr, fg.get("value", 50))
+                _already_open_syms.add(_sym)
 
     # ── Telegram Final Report ──
     # Build a single unified message for High-Conviction only
