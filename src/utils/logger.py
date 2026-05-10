@@ -193,14 +193,13 @@ def update_open_positions() -> None:
     """Fetch prices and update all OPEN positions. Applies 24h strict strategy."""
     rows = _read()
     
-    # 1. Deduplicate OPEN positions immediately (keep only the FIRST one)
+    # 1. Deduplicate OPEN positions immediately
     seen_coins = set()
     rows_clean = []
     for r in rows:
         if r.get("status") == "OPEN":
             c = r.get("coin", "").upper()
             if c in seen_coins:
-                # Duplicate! Mark as EXCLUDED (Category Fix)
                 r["status"] = "EXCLUDED"
                 r["reasoning"] = r.get("reasoning", "") + " [DUPLICATE REMOVED]"
             else:
@@ -210,10 +209,27 @@ def update_open_positions() -> None:
 
     open_rows = [r for r in rows if r.get("status") == "OPEN"]
     if not open_rows:
-        _write(rows) # Save the deduplicated state
+        _write(rows)
         return
 
-    from src.connectors.coingecko import fetch_prices
+    from src.connectors.coingecko import fetch_prices, fetch_coin_list
+    
+    # Self-healing missing coin_ids
+    missing_ids = [r for r in open_rows if not r.get("coin_id")]
+    if missing_ids:
+        try:
+            full_list = fetch_coin_list()
+            cg_map = {c["symbol"].upper(): c["id"] for c in full_list}
+            for r in rows:
+                if r.get("status") == "OPEN" and not r.get("coin_id"):
+                    sym = r.get("coin", "").upper()
+                    if sym in cg_map:
+                        r["coin_id"] = cg_map[sym]
+                        print(f"  ✨ Self-healed coin_id for {sym} -> {r['coin_id']}")
+            # Refresh open_rows after healing
+            open_rows = [r for r in rows if r.get("status") == "OPEN"]
+        except Exception: pass
+
     coin_ids = list({r["coin_id"] for r in open_rows if r.get("coin_id")})
     try:
         price_objs = fetch_prices(coin_ids)
@@ -238,8 +254,8 @@ def update_open_positions() -> None:
         is_short = row.get("recommended_order") == "SHORT"
         pnl_pct = ((entry - usd) if is_short else (usd - entry)) / entry * 100
             
-        row["current_price"] = round(usd, 8)
-        row["pnl_pct"] = round(pnl_pct, 2)
+        row["current_price"] = str(round(usd, 8))
+        row["pnl_pct"] = str(round(pnl_pct, 2))
 
         try:
             entry_dt = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
@@ -249,44 +265,44 @@ def update_open_positions() -> None:
         # Close condition 1: WIN (+10%)
         if pnl_pct >= 10.0:
             row["status"]     = "WIN"
-            row["exit_price"] = round(usd, 8)
+            row["exit_price"] = str(round(usd, 8))
             row["close_date"] = _now_str
             new_wins.append(row)
             side = row.get("recommended_order", "LONG")
             print(f"  ✅ WIN ({side}): {row['coin']} {pnl_pct:+.1f}% within {hours_open:.1f}h")
             try:
                 from src.utils.telegram import send_telegram as _tg
-                _tg(f"✅ <b>WIN +10% ({side}) â€” {row['coin']}</b>\n"
+                _tg(f"✅ <b>WIN +10% ({side}) — {row['coin']}</b>\n"
                     f"  PnL: {pnl_pct:+.1f}% after {hours_open:.1f}h\n"
-                    f"  âœ… Position closed as WIN.")
+                    f"  ✅ Position closed as WIN.")
             except Exception: pass
             continue
 
         # Close condition 2: Stop Loss (-10%)
         if pnl_pct <= -10.0:
             row["status"]     = "LOSS"
-            row["exit_price"] = round(usd, 8)
+            row["exit_price"] = str(round(usd, 8))
             row["close_date"] = _now_str
             print(f"  🛑 LOSS (SL -10%): {row['coin']} {pnl_pct:+.1f}%")
             try:
                 from src.utils.telegram import send_telegram as _tg
-                _tg(f"🛑 <b>LOSS (SL -10%) â€” {row['coin']}</b>\n"
+                _tg(f"🛑 <b>LOSS (SL -10%) — {row['coin']}</b>\n"
                     f"  PnL: {pnl_pct:+.1f}%\n"
-                    f"  âŒ Position closed as LOSS.")
+                    f"  ❌ Position closed as LOSS.")
             except Exception: pass
             continue
 
         # Close condition 3: 24h timeout
         if hours_open >= 24.0:
             row["status"]     = "LOSS"
-            row["exit_price"] = round(usd, 8)
+            row["exit_price"] = str(round(usd, 8))
             row["close_date"] = _now_str
-            print(f"  â° LOSS (24h timeout): {row['coin']} {pnl_pct:+.1f}%")
+            print(f"  ⏰ LOSS (24h timeout): {row['coin']} {pnl_pct:+.1f}%")
             try:
                 from src.utils.telegram import send_telegram as _tg
-                _tg(f"â° <b>LOSS (24h Timeout) â€” {row['coin']}</b>\n"
+                _tg(f"⏰ <b>LOSS (24h Timeout) — {row['coin']}</b>\n"
                     f"  PnL: {pnl_pct:+.1f}% after {hours_open:.1f}h\n"
-                    f"  âŒ Position closed as LOSS.")
+                    f"  ❌ Position closed as LOSS.")
             except Exception: pass
             continue
 
