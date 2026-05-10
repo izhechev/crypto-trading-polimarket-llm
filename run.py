@@ -569,8 +569,37 @@ def run_scan_cycle(
             print("     Blocking all new LONG/SPOT entries until market stabilizes.")
     except Exception: pass
 
-    # We require a strict Groq HIGH confidence verdict (>= 0.8).
-    best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.8]
+    # We require a strict Groq HIGH confidence verdict (>= 0.8) OR 
+    # a Medium confidence (>= 0.6) with a near-perfect technical score.
+    best_picks = []
+    for r in recs:
+        if r.get("verdict") != "BUY": continue
+        conf = r.get("confidence_score", 0)
+        score = r.get("scanner_score", 0)
+        side = r.get("recommended_order", "SPOT")
+        
+    # We require a strict Groq HIGH confidence verdict (>= 0.8) OR 
+    # a Medium confidence (>= 0.6) with a near-perfect technical score.
+    best_picks = []
+    print("\n  🔍 God-Tier Filter Check:")
+    for r in recs:
+        sym = r["coin"].upper()
+        if r.get("verdict") != "BUY": 
+            print(f"     ❌ {sym} rejected: Groq verdict is {r.get('verdict')}")
+            continue
+        
+        conf = r.get("confidence_score", 0)
+        score = r.get("scanner_score", 0)
+        side = r.get("recommended_order", "SPOT")
+        
+        is_high_conf = conf >= 0.8
+        is_elite_tech = (side in ("LONG", "SHORT") and score >= 11) or (side == "SPOT" and score >= 10)
+        
+        if is_high_conf or (conf >= 0.6 and is_elite_tech):
+            best_picks.append(r)
+        else:
+            reason = "AI confidence too low" if conf < 0.6 else "Needs elite score for medium confidence"
+            print(f"     ❌ {sym} rejected: {reason} (Conf: {r.get('confidence','?')}, Score: {score})")
     
     if best_picks:
         print_header("GOD-TIER HIGH-CONVICTION OPPORTUNITIES")
@@ -578,41 +607,45 @@ def run_scan_cycle(
             _sym  = p["coin"].upper()
             _side = p.get("recommended_order", "SPOT")
             _conf = p.get("confidence", "LOW")
-            
-            # Additional safety check: only open if scanner score is absolutely elite
-            # (Long/Short >= 10, Spot >= 8) out of a maximum of 12.
             _score = p.get("scanner_score", 0)
-            _meets_extreme_score = (_side in ("LONG", "SHORT") and _score >= 10) or (_side == "SPOT" and _score >= 8)
+            
+            # Final God-Tier Technical Gate (must be >= 10 L/S or >= 8 Spot)
+            _meets_base_god_tier = (_side in ("LONG", "SHORT") and _score >= 10) or (_side == "SPOT" and _score >= 8)
 
-            if _meets_extreme_score:
+            if _meets_base_god_tier:
                 # Apply BTC Gate: Block Long/Spot if BTC is bearish
                 if _btc_gate_active and _side in ("LONG", "SPOT"):
-                    print(f"  🛑 {_sym} rejected: Setup is elite, but BTC Safety Gate is BLOCKING longs.")
+                    print(f"     🛑 {_sym} rejected: BTC Safety Gate is BLOCKING longs.")
                     continue
 
-                print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}, Score: {_score}) | Price: ${p.get('entry_price', 0):.4f}")
-                print(f"     💬 {p.get('reasoning', '')[:120]}...")
+                if _sym in _already_open_syms:
+                    print(f"     ℹ️  {_sym} rejected: Position already OPEN.")
+                    continue
 
-                if _sym not in _already_open_syms:
-                    _ep = float(p.get("entry_price") or 0)
-                    _cid = p.get("coin_id")
-                    if not _cid:
-                        matched = next((r for r in top10 if r["symbol"].upper() == _sym), None)
-                        if matched: _cid = matched["coin_id"]
+                _ep = float(p.get("entry_price") or 0)
+                _cid = p.get("coin_id")
+                if not _cid:
+                    matched = next((r for r in top10 if r["symbol"].upper() == _sym), None)
+                    if matched: _cid = matched["coin_id"]
 
-                    if _ep > 0 and _cid:
-                        if _side == "SHORT": _tp, _sl = _ep * 0.90, _ep * 1.10
-                        else: _tp, _sl = _ep * 1.10, _ep * 0.90
-                        
-                        log_recommendation({
-                            "coin": _sym, "coin_id": _cid,
-                            "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
-                            "timeframe": "24h Window", "reasoning": f"God-Tier Conviction BUY. Conf: {_conf}, Score: {_score}.",
-                            "recommended_order": _side,
-                        }, fg.get("value", 50))
-                        _already_open_syms.add(_sym)
+                if _ep > 0 and _cid:
+                    print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}, Score: {_score}) | Price: ${p.get('entry_price', 0):.4f}")
+                    print(f"     💬 {p.get('reasoning', '')[:120]}...")
+
+                    if _side == "SHORT": _tp, _sl = _ep * 0.90, _ep * 1.10
+                    else: _tp, _sl = _ep * 1.10, _ep * 0.90
+                    
+                    log_recommendation({
+                        "coin": _sym, "coin_id": _cid,
+                        "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
+                        "timeframe": "24h Window", "reasoning": f"God-Tier Conviction BUY. Conf: {_conf}, Score: {_score}.",
+                        "recommended_order": _side,
+                    }, fg.get("value", 50))
+                    _already_open_syms.add(_sym)
+                else:
+                    print(f"     ❌ {_sym} rejected: Missing price (${_ep}) or CoinID ({_cid})")
             else:
-                print(f"  ❌ {_sym} rejected: LLM confidence is {_conf}, but technical score ({_score}) is not elite enough.")
+                print(f"     ❌ {_sym} rejected: Technical score ({_score}) not elite enough for God-Tier mode.")
     else:
         print("\n  ℹ️  No God-Tier BUY opportunities this cycle.")
 

@@ -8,6 +8,72 @@ import config
 from src.utils.budget_tracker import log_llm_call, check_budget, BudgetExceededError
 
 
+def _prefilter_groq_candidates(
+    top10: list[dict],
+    already_open: set[str] | None = None,
+) -> tuple[list[dict], list[str], list[str]]:
+    """Apply hard safety gates before sending candidates to Groq."""
+    groq_candidates: list[dict] = []
+    hard_removed: list[str] = []
+    score_capped: list[str] = []
+
+    _SCORE_CAP_MACD_NEUTRAL = 2
+    _open_set = {s.upper() for s in (already_open or set())}
+
+    for r in top10:
+        sym      = r["symbol"].upper()
+        macd_v   = (r.get("macd") or "").upper()
+        trend_v  = (r.get("trend") or "").upper()
+        bb_pos   = r.get("bb_pos", "")
+        s_risk   = r.get("supply_risk", "NONE")
+        rsi      = r.get("rsi") or 0.0
+        vol_mcap = r.get("vol_mcap") or 0.0
+        ch24     = r.get("change_24h") or 0.0
+        ch7d     = r.get("change_7d") or 0.0
+        score    = r.get("score", 0)
+
+        reason = None
+
+        if bb_pos == "ABOVE_UPPER":
+            reason = "above upper BB"
+        elif s_risk != "NONE":
+            reason = f"supply risk={s_risk}"
+        elif (macd_v == "BEARISH" and trend_v == "BEARISH"
+              and ch7d < -10 and ch24 < -3):
+            reason = f"full bearish alignment (MACD+Trend+7d{ch7d:+.0f}%+24h{ch24:+.0f}%)"
+        elif score <= 0:
+            reason = f"score={score} (negative - skip)"
+        elif sym in _open_set:
+            reason = "already OPEN"
+        else:
+            _macd_bull = macd_v == "BULLISH"
+            path_a = ch24 > 2.0    and 50 <= rsi <= 75 and _macd_bull
+            path_b = ch7d < -15.0  and _macd_bull       and 35 <= rsi <= 55
+            path_c = score >= 9    and vol_mcap >= 0.15 and _macd_bull
+            if not (path_a or path_b or path_c):
+                reason = (
+                    f"no path qualified - "
+                    f"A(24h{ch24:+.1f}%,RSI{rsi:.0f},MACD{macd_v[:4]}) "
+                    f"B(7d{ch7d:+.0f}%,RSI{rsi:.0f}) "
+                    f"C(sc={score},vol={vol_mcap:.2f}x)"
+                )
+
+        if reason:
+            hard_removed.append(f"{sym}({reason})")
+            continue
+
+        candidate = dict(r)
+        if macd_v == "BEARISH" and trend_v != "BULLISH":
+            if candidate["score"] > _SCORE_CAP_MACD_NEUTRAL:
+                candidate["score"] = _SCORE_CAP_MACD_NEUTRAL
+                candidate["_score_capped"] = True
+                score_capped.append(sym)
+
+        groq_candidates.append(candidate)
+
+    return groq_candidates, hard_removed, score_capped
+
+
 def analyze_with_groq(
     top10: list[dict],
     fear_greed: dict,
@@ -117,9 +183,9 @@ def analyze_with_groq(
         # Reject only if NONE of the three qualifies.
         else:
             _macd_bull = macd_v == "BULLISH"
-            path_a = ch24 > 2.0    and 50 <= rsi <= 70 and _macd_bull
+            path_a = ch24 > 2.0    and 50 <= rsi <= 75 and _macd_bull
             path_b = ch7d < -15.0  and _macd_bull       and 35 <= rsi <= 55
-            path_c = score >= 9    and vol_mcap > 0.5   and _macd_bull
+            path_c = score >= 9    and vol_mcap >= 0.15 and _macd_bull
             if not (path_a or path_b or path_c):
                 reason = (
                     f"no path qualified — "

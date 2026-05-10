@@ -329,21 +329,13 @@ def check_price_alerts() -> None:
 
         try:
             entry = float(row["entry_price"])
-            sl    = float(row["stop_loss"])
-            tp    = float(row["take_profit"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             continue
 
         order_type = row.get("recommended_order", "SPOT")
         is_short = order_type == "SHORT"
-        is_long = order_type == "LONG"
         
-        base_pnl_pct = ((entry - usd) / entry * 100) if is_short else ((usd - entry) / entry * 100)
-        
-        if is_long or is_short:
-            pnl_pct = base_pnl_pct * 10.0  # 10x leverage
-        else:
-            pnl_pct = base_pnl_pct
+        pnl_pct = ((entry - usd) / entry * 100) if is_short else ((usd - entry) / entry * 100)
 
         coin    = row.get("coin", "").upper()
         key     = _position_key(row)
