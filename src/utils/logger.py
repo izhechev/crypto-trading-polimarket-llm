@@ -383,27 +383,48 @@ def print_daily_activity() -> None:
     print(f"  Closed LOSS: {', '.join(f'{r['coin']} {float(r['pnl_pct']):+.1f}%' for r in losses) or 'none'}")
 def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] | None = None, fear_greed: dict | None = None) -> None:
     rows = _read()
-    open_rows = [r for r in rows if r.get("status") == "OPEN"]
-    print(f"\n  OPEN POSITIONS ({len(open_rows)}/{_MAX_OPEN_SCANNER} slots used):")
-    for r in sorted(open_rows, key=lambda x: x.get("date", ""), reverse=True):
-        try:
-            entry = float(r.get("entry_price") or 0)
-            curr = float(r.get("current_price") or entry)
-            
-            # Age calculation
-            try:
-                entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-                hrs = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
-                age_str = f"{hrs:.1f}h" if hrs < 24 else f"{hrs/24:.1f}d"
-            except Exception: age_str = "?h"
+    
+    # Split OPEN by type
+    open_scanner = [r for r in rows if r.get("status") == "OPEN" and r.get("type", "SCANNER") != "WHALE_RIDE"]
+    open_whale   = [r for r in rows if r.get("status") == "OPEN" and r.get("type") == "WHALE_RIDE"]
 
-            is_short = r.get("recommended_order") == "SHORT"
-            pnl = ((entry - curr) if is_short else (curr - entry)) / entry * 100 if entry > 0 else 0
-            
-            icon = "+" if pnl >= 0 else "-"
-            side = r.get("recommended_order", "SPOT")
-            print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}% ({side})  [{age_str}]  entry {entry:.4f}  now {curr:.4f}")
-        except Exception: pass
+    print(f"\n  💼  OPEN SCANNER POSITIONS ({len(open_scanner)}):")
+    if open_scanner:
+        for r in sorted(open_scanner, key=lambda x: x.get("date", ""), reverse=True):
+            try:
+                entry = float(r.get("entry_price") or 0)
+                curr = float(r.get("current_price") or entry)
+                try:
+                    entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                    hrs = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
+                    age_str = f"{hrs:.1f}h" if hrs < 24 else f"{hrs/24:.1f}d"
+                except Exception: age_str = "?h"
+                is_short = r.get("recommended_order") == "SHORT"
+                pnl = ((entry - curr) if is_short else (curr - entry)) / entry * 100 if entry > 0 else 0
+                icon = "🟢" if pnl >= 0 else "🔴"
+                side = r.get("recommended_order", "SPOT")
+                print(f"    {icon} {r['coin']:8s}  {pnl:+.1f}% ({side})  [{age_str}]  entry {entry:.4f}  now {curr:.4f}")
+            except Exception: pass
+    else:
+        print("    (none)")
+
+    print(f"\n  🐋  OPEN WHALE RIDE POSITIONS ({len(open_whale)}):")
+    if open_whale:
+        for r in sorted(open_whale, key=lambda x: x.get("date", ""), reverse=True):
+            try:
+                entry = float(r.get("entry_price") or 0)
+                curr = float(r.get("current_price") or entry)
+                try:
+                    entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                    hrs = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
+                    age_str = f"{hrs:.1f}h" if hrs < 24 else f"{hrs/24:.1f}d"
+                except Exception: age_str = "?h"
+                pnl = (curr - entry) / entry * 100 if entry > 0 else 0
+                icon = "🟢" if pnl >= 0 else "🔴"
+                print(f"    {icon} {r['coin']:8s}  {pnl:+.1f}%  [{age_str}]  entry {entry:.4f}  now {curr:.4f}")
+            except Exception: pass
+    else:
+        print("    (none)")
 
     # ── Most Valuable Picks (Scanner) ──
     if top10:
@@ -412,7 +433,7 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
         spots  = [r for r in top10 if r.get("recommended_order") == "SPOT"]
         
         if longs or shorts or spots:
-            print(f"\n  MOST VALUABLE SCANNER PICKS:")
+            print(f"\n  🎯  MOST VALUABLE SCANNER PICKS:")
             if longs:
                 print("    🚀 LONGS:")
                 for i, r in enumerate(longs[:5], 1):
@@ -430,7 +451,7 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
 
     # ── Valuable Whale Rides ──
     if whale_rides:
-        print(f"\n  🐋  VALUABLE WHALE RIDE CANDIDATES:")
+        print(f"\n  🌊  VALUABLE WHALE RIDE CANDIDATES:")
         for i, wr in enumerate(whale_rides[:5], 1):
             sym = wr.get("symbol", "?")
             cyc = wr.get("cycle_number", "?")
@@ -441,9 +462,23 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
 
 
 def print_track_record() -> None:
+    """Print category-specific win/loss records."""
     rows = _read()
-    wins = [r for r in rows if r.get("status") == "WIN"]
-    losses = [r for r in rows if r.get("status") == "LOSS"]
-    total = len(wins) + len(losses)
-    rate = (len(wins) / total * 100) if total else 0
-    print(f"\n  TRACK RECORD: {len(wins)}W / {len(losses)}L ({rate:.1f}% win rate)")
+    
+    def _stats(label, trades):
+        wins = [r for r in trades if r.get("status") == "WIN"]
+        losses = [r for r in trades if r.get("status") == "LOSS"]
+        total = len(wins) + len(losses)
+        rate = (len(wins) / total * 100) if total else 0
+        return f"{label}: {len(wins)}W / {len(losses)}L ({rate:.1f}% win rate)"
+
+    # Scanner stats
+    scanner_trades = [r for r in rows if r.get("type", "SCANNER") != "WHALE_RIDE"]
+    print(f"\n  {_stats('SCANNER TRACK RECORD', scanner_trades)}")
+    
+    # Whale Ride stats
+    whale_trades = [r for r in rows if r.get("type") == "WHALE_RIDE"]
+    print(f"  {_stats('WHALE RIDE TRACK RECORD', whale_trades)}")
+    
+    # Combined
+    print(f"  {_stats('TOTAL COMBINED RECORD', rows)}")
