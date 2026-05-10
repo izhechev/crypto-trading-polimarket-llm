@@ -92,6 +92,23 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
     ema_50_val = float(ema_50.iloc[-1]) if ema_50 is not None and not ema_50.empty else None
     ema_200_val = float(ema_200.iloc[-1]) if ema_200 is not None and not ema_200.empty else None
 
+    # ADX (Trend Strength)
+    adx_val = None
+    if HAS_PTA and len(df) >= 27:
+        adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+        if adx_df is not None and not adx_df.empty:
+            adx_val = float(adx_df.iloc[-1, 0]) # ADX_14
+
+    # Ichimoku Cloud (simple check)
+    ichimoku_verdict = "NEUTRAL"
+    if HAS_PTA and len(df) >= 52:
+        ichimoku_df, _ = ta.ichimoku(df["high"], df["low"], df["close"])
+        if ichimoku_df is not None and not ichimoku_df.empty:
+            span_a = ichimoku_df.iloc[-1, 0] # ISA_9
+            span_b = ichimoku_df.iloc[-1, 1] # ISB_26
+            if price > span_a and price > span_b: ichimoku_verdict = "BULLISH"
+            elif price < span_a and price < span_b: ichimoku_verdict = "BEARISH"
+
     # RSI Divergence check (simple: last 10 candles)
     rsi_div = "NONE"
     if rsi_series is not None and len(df) >= 10:
@@ -114,6 +131,10 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
         if price > ema_200_val: bullish_score += 2
         else: bearish_score += 2
     
+    # Ichimoku confirmation
+    if ichimoku_verdict == "BULLISH": bullish_score += 2
+    elif ichimoku_verdict == "BEARISH": bearish_score += 2
+
     # Momentum
     if rsi:
         if rsi < 35: bullish_score += 2 # Oversold
@@ -130,6 +151,11 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
         bearish_score += 2
         if macd_line_val > 0: bearish_score += 1 # Cross above zero is stronger
 
+    # Trend Strength (ADX)
+    if adx_val and adx_val > 25:
+        if bullish_score > bearish_score: bullish_score += 2 # Stronger bullish
+        elif bearish_score > bullish_score: bearish_score += 2 # Stronger bearish
+
     if rsi_div == "BULLISH": bullish_score += 3
     elif rsi_div == "BEARISH": bearish_score += 3
 
@@ -138,9 +164,9 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
 
     # Final Verdict
     recommended_order = "NONE"
-    if bullish_score >= 8: recommended_order = "LONG"
-    elif bearish_score >= 8: recommended_order = "SHORT"
-    elif bullish_score >= 4: recommended_order = "SPOT"
+    if bullish_score >= 10: recommended_order = "LONG"
+    elif bearish_score >= 10: recommended_order = "SHORT"
+    elif bullish_score >= 5: recommended_order = "SPOT"
 
     if bullish_score > bearish_score:
         trend = "BULLISH"
@@ -149,11 +175,13 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
     else:
         trend = "NEUTRAL"
 
-    confidence = max(bullish_score, bearish_score) / 15.0 # Max possible ~15
+    confidence = max(bullish_score, bearish_score) / 20.0 # Max possible ~20
 
     # Key observation
     observations = []
     if rsi_div != "NONE": observations.append(f"{rsi_div} RSI divergence")
+    if adx_val and adx_val > 25: observations.append(f"strong trend (ADX {adx_val:.0f})")
+    if ichimoku_verdict != "NEUTRAL": observations.append(f"Ichimoku {ichimoku_verdict.lower()}")
     if ema_200_val: observations.append("above 200 EMA" if price > ema_200_val else "below 200 EMA")
     observations.append(f"MACD {macd_signal.lower()}")
     observations.append(f"Bollinger {bb_position.lower().replace('_', ' ')}")

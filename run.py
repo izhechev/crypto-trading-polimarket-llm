@@ -1170,7 +1170,7 @@ def main():
     parser.add_argument("--polymarket",       action="store_true", help="Polymarket-only analysis")
     parser.add_argument("--news",             action="store_true", help="Quick news check for open stock positions only")
     parser.add_argument("--schedule",         action="store_true", help="Run full scan every 1 hour (Telegram + log)")
-    parser.add_argument("--crypto_scheduler", action="store_true", help="Run crypto-only scan every 1 hour (Telegram + log)")
+    parser.add_argument("--crypto_scheduler", "-cs", "-scheduler", action="store_true", help="Run crypto-only scan every 1 hour (Telegram + log)")
     parser.add_argument("--debate",           action="store_true", help="Enable Bull/Bear/Risk Manager debate pipeline")
     parser.add_argument("--whale",            action="store_true", help="Run one whale ride check now (top 750 Kraken coins)")
     parser.add_argument("--tavily-status",    action="store_true", help="Show Tavily AI monthly credit usage")
