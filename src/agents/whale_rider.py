@@ -563,9 +563,12 @@ def send_whale_ride_alerts(
         if is_new:
             sent.append(c)
             _whale_entry_alerts_sent.add(sym)
-            # Auto-open position: top 3 EARLY only, skip if too many open
+            
+            # Auto-open position: only HIGH-CONVICTION ones (score >= 3)
+            # This ensures only statistically 'best' whale rides are opened.
+            _hc_score = c.get("hc_score", 0)
             _should_open = (
-                stage == "EARLY"
+                _hc_score >= 3
                 and _auto_opened < _MAX_WHALE_AUTO
                 and _open_count < _MAX_TOTAL_POSITIONS
             )

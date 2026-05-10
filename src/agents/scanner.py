@@ -2263,17 +2263,32 @@ def run_smart_scanner(
         log_recommendation(rec, fear_greed.get("value", 50))
         _open_syms.add(_sym)
 
-    # 2. Valuable Whale Rides
-    valuable_wr = [wr for wr in all_whale_rides if wr.get("cycle_number", 0) >= 1]
-    for wr in valuable_wr:
+    # 2. Valuable Whale Rides (Statistical filtering)
+    def _get_wr_score(wr: dict) -> int:
+        score = 0
+        mcap = wr.get("market_cap", 0)
+        ch7d = wr.get("change_7d", 0)
+        cyc  = wr.get("cycle_number", 1)
+        
+        if cyc >= 2: score += 3  # Proven recurring pattern
+        if mcap < 50_000_000: score += 2  # Low cap = high potential
+        elif mcap < 150_000_000: score += 1
+        
+        if ch7d > 50: score += 1  # Recent momentum
+        return score
+
+    valuable_wr = []
+    for wr in all_whale_rides:
         _sym = wr.get("symbol", "").upper()
         if _sym in _open_syms:
             continue
-        log_whale_ride(wr, fear_greed.get("value", 50))
-        _open_syms.add(_sym)
-
-    # Final count of high-value picks
-    quality_count = len(top_longs) + len(top_shorts) + len(top_spots)
+            
+        wr["hc_score"] = _get_wr_score(wr)
+        # ONLY OPEN if proven (cycle >= 2) OR high statistical score (>= 3)
+        if wr["hc_score"] >= 3 or wr.get("cycle_number", 0) >= 2:
+            log_whale_ride(wr, fear_greed.get("value", 50))
+            _open_syms.add(_sym)
+            valuable_wr.append(wr)
 
     return top10, pump_coins, all_whale_rides, quality_count, _catalysts
 
