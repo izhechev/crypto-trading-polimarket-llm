@@ -506,17 +506,15 @@ def log_recommendation(rec: dict, fear_greed_value: int) -> None:
     rows = _read()
     coin = rec.get("coin", "").upper()
 
-    # DCA check — allow multiple positions per coin up to the cap
+    # Strict tracking strategy: only one open position per coin. No DCA.
     open_for_coin = [
         r for r in rows
-        if r.get("type", "") in ("SCANNER", "")
+        if r.get("type", "") in ("SCANNER", "WHALE_RIDE", "")
         and r.get("status") == "OPEN"
         and r.get("coin", "").upper() == coin
     ]
-    if len(open_for_coin) >= _MAX_DCA_PER_COIN:
-        print(f"  Skipped — {coin} already has {len(open_for_coin)} open DCA positions (max {_MAX_DCA_PER_COIN})")
+    if open_for_coin:
         return
-    is_dca = len(open_for_coin) > 0
 
     # Max concurrent positions cap — quality over quantity
     open_count = sum(
@@ -525,7 +523,6 @@ def log_recommendation(rec: dict, fear_greed_value: int) -> None:
         and r.get("status") == "OPEN"
     )
     if open_count >= _MAX_OPEN_SCANNER:
-        print(f"  Skipped — {coin}: max open positions reached ({open_count}/{_MAX_OPEN_SCANNER})")
         return
 
     # Category guard: if this coin has an OPEN WHALE_RIDE entry, close it as EXCLUDED
@@ -539,59 +536,48 @@ def log_recommendation(rec: dict, fear_greed_value: int) -> None:
                 "[SCANNER PICK SUPERSEDES WHALE_RIDE — category corrected] "
                 + r.get("reasoning", "")
             )
-            print(f"  Closed WHALE_RIDE for {coin} — superseded by scanner pick (category fix)")
 
     # Cooldowns only apply when there are NO existing open positions for this coin.
-    # If we already hold the coin (DCA add), skip cooldowns — we're already exposed.
     prev_note = ""
-    if not is_dca:
-        closed_trades = [
-            r for r in rows
-            if r.get("coin", "").upper() == coin
-            and r.get("type", "") in ("SCANNER", "")
-            and r.get("status") in ("WIN", "LOSS", "TIME EXIT", "EXCLUDED")
-        ]
-        if closed_trades:
-            last = max(closed_trades, key=lambda r: r.get("date", ""))
-            prev_status = last.get("status", "")
+    closed_trades = [
+        r for r in rows
+        if r.get("coin", "").upper() == coin
+        and r.get("type", "") in ("SCANNER", "")
+        and r.get("status") in ("WIN", "LOSS", "TIME EXIT", "EXCLUDED")
+    ]
+    if closed_trades:
+        last = max(closed_trades, key=lambda r: r.get("date", ""))
+        prev_status = last.get("status", "")
 
-            # 48h cooldown after LOSS — let the coin stabilize before re-entering
-            if prev_status == "LOSS":
-                try:
-                    last_dt = datetime.strptime(last["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-                    hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
-                    if hours_since < 48:
-                        print(f"  Cooldown — {coin} closed as LOSS {hours_since:.0f}h ago, skipping for 48h")
-                        return
-                except Exception:
-                    pass
-
-            if prev_status == "EXCLUDED":
-                try:
-                    last_dt = datetime.strptime(last["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-                    hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
-                    if hours_since < 168:  # 7 days
-                        if rec.get("web_research_verdict") == "CONFIRM":
-                            last["status"] = "EXCLUDED_CLEARED"
-                            _write(rows)
-                            print(f"  ✅ {coin} exclusion lifted — web validation CONFIRM overrides {hours_since:.0f}h cooldown")
-                        else:
-                            days_left = (168 - hours_since) / 24
-                            print(f"  Cooldown — {coin} EXCLUDED {hours_since:.0f}h ago (fundamental issue), {days_left:.1f}d remaining")
-                            return
-                except Exception:
-                    pass
-
+        # 48h cooldown after LOSS — let the coin stabilize before re-entering
+        if prev_status == "LOSS":
             try:
-                prev_pnl = float(last.get("pnl_pct", 0))
-                prev_note = f" | new position (prev: {prev_status} {prev_pnl:+.1f}%)"
-            except (ValueError, TypeError):
-                prev_note = f" | new position (prev: {prev_status})"
-            print(f"  Re-opening {coin} — {prev_note.strip(' | ')}")
-    else:
-        dca_note = f" | DCA #{len(open_for_coin)+1} @ ${rec.get('entry_price', '?')}"
-        prev_note = dca_note
-        print(f"  DCA add — {coin} position #{len(open_for_coin)+1}")
+                last_dt = datetime.strptime(last["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                if hours_since < 48:
+                    return
+            except Exception:
+                pass
+
+        if prev_status == "EXCLUDED":
+            try:
+                last_dt = datetime.strptime(last["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                if hours_since < 168:  # 7 days
+                    if rec.get("web_research_verdict") == "CONFIRM":
+                        last["status"] = "EXCLUDED_CLEARED"
+                        _write(rows)
+                    else:
+                        return
+            except Exception:
+                pass
+
+        try:
+            prev_pnl = float(last.get("pnl_pct", 0))
+            prev_note = f" | new position (prev: {prev_status} {prev_pnl:+.1f}%)"
+        except (ValueError, TypeError):
+            prev_note = f" | new position (prev: {prev_status})"
+
 
     pid = _make_position_id(coin)
     base_reasoning = rec.get("reasoning", "").replace("\n", " ")
@@ -1782,8 +1768,7 @@ def print_scan_summary(
                 entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                 age = (datetime.now(timezone.utc) - entry_dt).days
                 icon = "+" if pnl >= 0 else "-"
-                dca = " [DCA]" if _sc_by_coin.get(r["coin"].upper(), 0) > 1 else ""
-                print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%  ({age}d)  entry {_pe(entry)}  now {_pe(curr)}{dca}")
+                print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%  ({age}d)  entry {_pe(entry)}  now {_pe(curr)}")
             except (ValueError, KeyError):
                 pass
     else:
@@ -2062,27 +2047,14 @@ def print_track_record() -> None:
                 entry_dt  = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
                 days_open = (datetime.now(timezone.utc) - entry_dt).days
                 pid_tag   = f"  [{r['position_id']}]" if r.get("position_id") else ""
-                dca_tag   = "  [DCA]" if _open_by_coin.get(r["coin"].upper(), 0) > 1 else ""
                 print(
                     f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}%"
                     f"  ({days_open}d)"
                     f"  entry {_usd_to_eur(entry_usd)}  now {_usd_to_eur(usd)}"
-                    f"{dca_tag}{pid_tag}"
+                    f"{pid_tag}"
                 )
             except (ValueError, KeyError):
                 pass
-
-        # Show avg entry for coins with multiple DCA positions
-        for coin_u, cnt in _open_by_coin.items():
-            if cnt > 1:
-                dca_rows = [r for r in open_scanner if r["coin"].upper() == coin_u]
-                try:
-                    entries = [float(r["entry_price"]) for r in dca_rows if r.get("entry_price")]
-                    if entries:
-                        avg_e = sum(entries) / len(entries)
-                        print(f"    ↳ {coin_u} avg entry (DCA {cnt} positions): {_usd_to_eur(avg_e)}")
-                except Exception:
-                    pass
 
     # ── Closed trades with individual P&L ────────────────────────────────
     closed_scanner = [r for r in scanner_rows if r.get("status") in ("WIN", "LOSS", "TIME EXIT", "EXPIRED")]

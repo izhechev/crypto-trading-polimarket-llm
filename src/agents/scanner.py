@@ -2232,15 +2232,26 @@ def run_smart_scanner(
         print(f"  ⚠️  Telegram valuable summary failed: {_tg_e}")
 
     # ── Auto-Log All Top Picks ──
-    from src.utils.logger import log_recommendation, log_whale_ride
+    from src.utils.logger import log_recommendation, log_whale_ride, _read as _log_read
     
+    _all_rows = _log_read()
+    _open_syms = {
+        r.get("coin", "").upper()
+        for r in _all_rows
+        if r.get("status") == "OPEN"
+    }
+
     # 1. Scanner Picks (Long/Short/Spot)
     for r in top_longs + top_shorts + top_spots:
+        _sym = r["symbol"].upper()
+        if _sym in _open_syms:
+            continue # Skip already open
+            
         # Use +10% TP and -10% SL for all, as requested
         entry = r.get("price", 0)
         if not entry: continue
         rec = {
-            "coin":        r["symbol"],
+            "coin":        _sym,
             "coin_id":     r["coin_id"],
             "entry_price": round(entry, 8),
             "stop_loss":   round(entry * 0.90, 8),
@@ -2250,11 +2261,16 @@ def run_smart_scanner(
             "recommended_order": r["recommended_order"],
         }
         log_recommendation(rec, fear_greed.get("value", 50))
+        _open_syms.add(_sym)
 
     # 2. Valuable Whale Rides
     valuable_wr = [wr for wr in all_whale_rides if wr.get("cycle_number", 0) >= 1]
     for wr in valuable_wr:
+        _sym = wr.get("symbol", "").upper()
+        if _sym in _open_syms:
+            continue
         log_whale_ride(wr, fear_greed.get("value", 50))
+        _open_syms.add(_sym)
 
     # Final count of high-value picks
     quality_count = len(top_longs) + len(top_shorts) + len(top_spots)

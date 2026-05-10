@@ -469,43 +469,8 @@ def run_scan_cycle(
             #         f"Stale: {len(_stale_pm)}"
             #     )
             # Telegram alerts
-            _pm_msgs: list[str] = []
-            for _p in _tp_near:
-                _pnl_s = f"{_p['pnl_pct']:+.1f}%" if _p["pnl_pct"] is not None else "N/A"
-                _pm_msgs.append(
-                    f"🎯 <b>APPROACHING TP — {_p['symbol']}</b>\n"
-                    f"  PnL: {_pnl_s}  |  Age: {_p['age_days']}d\n"
-                    f"  Entry: ${_p['entry']:.4f}  |  TP: ${_p['tp']:.4f}\n"
-                    f"  👉 Consider taking profit soon"
-                )
-            for _p in _crit_loss:
-                _pnl_s = f"{_p['pnl_pct']:+.1f}%" if _p["pnl_pct"] is not None else "N/A"
-                _cur_pm = _sym_price_pm.get(_p["symbol"], 0)
-                _sl_dist = (
-                    f"  SL dist: {(_cur_pm - _p['sl']) / _cur_pm * 100:+.1f}%"
-                    if _cur_pm > 0 and _p["sl"] > 0 else ""
-                )
-                _pm_msgs.append(
-                    f"🔴 <b>CRITICAL LOSS — {_p['symbol']}</b>\n"
-                    f"  PnL: {_pnl_s}  |  Age: {_p['age_days']}d\n"
-                    f"  Entry: ${_p['entry']:.4f}  |  SL: ${_p['sl']:.4f}{_sl_dist}\n"
-                    f"  ⚠️ Monitor closely — approaching stop loss"
-                )
-            if _stale_pm:
-                _stale_lines = "\n".join(
-                    f"  ⏰ {_p['symbol']:8s}  {(_p['pnl_pct'] or 0.0):+.1f}%  ({_p['age_days']}d)"
-                    for _p in _stale_pm
-                )
-                _pm_msgs.append(
-                    f"⏳ <b>STALE POSITIONS — FORCE CLOSE</b>\n{_stale_lines}\n"
-                    f"  Reason: ≥7d held with &lt;+3% PnL — TIME EXIT"
-                )
-            # DATA COLLECTION MODE: no position cap — omit FULL / NEAR FULL alerts
-            for _msg in _pm_msgs:
-                try:
-                    send_telegram(_msg)
-                except Exception:
-                    pass
+            # Proximity alerts disabled for 24h strict window strategy
+            pass
     except Exception as _e_pm:
         print(f"  ⚠️  Portfolio alert check failed: {_e_pm}")
 
