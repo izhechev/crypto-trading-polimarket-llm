@@ -261,11 +261,7 @@ def update_open_positions() -> None:
         
         base_pnl_pct = ((entry - usd) if is_short else (usd - entry)) / entry * 100
         
-        # Apply 10x leverage to LONG and SHORT positions (but not SPOT)
-        if order_type in ("LONG", "SHORT"):
-            pnl_pct = base_pnl_pct * 10.0
-        else:
-            pnl_pct = base_pnl_pct
+        pnl_pct = base_pnl_pct
             
         row["current_price"] = str(round(usd, 8))
         row["pnl_pct"] = str(round(pnl_pct, 2))
