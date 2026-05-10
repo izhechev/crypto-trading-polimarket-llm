@@ -193,8 +193,7 @@ def fetch_binance_ticker(symbol: str) -> dict | None:
         }
         _set_cache(cache_key, result)
         return result
-    except Exception as e:
-        print(f"  [Binance] ticker error for {symbol}: {e}")
+    except Exception:
         return None
 
 
@@ -219,8 +218,7 @@ def fetch_binance_ohlcv(
         candles = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
         _set_cache(cache_key, candles)
         return candles
-    except Exception as e:
-        print(f"  [Binance] OHLCV error for {symbol}: {e}")
+    except Exception:
         return None
 
 
@@ -240,8 +238,7 @@ def fetch_binance_orderbook(symbol: str, limit: int = 20) -> dict | None:
             "best_ask": best_ask,
             "spread_pct": round(spread, 4),
         }
-    except Exception as e:
-        print(f"  [Binance] orderbook error for {symbol}: {e}")
+    except Exception:
         return None
 
 
@@ -267,8 +264,7 @@ def get_binance_symbols() -> set[str]:
         # Cache for 1 hour
         _cache[cache_key] = (time.time() + 3600 - CACHE_TTL, symbols)
         return symbols
-    except Exception as e:
-        print(f"  [Binance] Failed to load markets: {e}")
+    except Exception:
         return set(_COIN_IDS.keys())
 
 
