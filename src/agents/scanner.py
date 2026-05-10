@@ -2263,7 +2263,8 @@ def run_smart_scanner(
     return top10, pump_coins, valuable_wr, quality_count, _catalysts, categories
 
 
-    def _print_pick(rank: int, r: dict, catalysts: dict) -> None:    """Helper to print a pick's details."""
+def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
+    """Helper to print a pick's details."""
     supply_tag   = "  [⚠️ MED SUPPLY — HALF SIZE]" if r.get("supply_risk") == "MEDIUM" else ""
     hold_tag      = "  [📌 OPEN — HOLD]" if r.get("_already_open") else ""
     print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  score: {r['score']} pts{supply_tag}{hold_tag}")
