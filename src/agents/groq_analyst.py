@@ -207,51 +207,27 @@ def analyze_with_groq(
     news_section       = f"\nADDITIONAL MARKET NEWS:\n{news_text}\n" if news_text else ""
     enrichment_section = f"\nMARKET INTELLIGENCE:\n{enrichment_text}\n" if enrichment_text else ""
 
-    # Load risk cache to tag manipulated/scam pump alerts
-    _risk_cache: dict = {}
-    try:
-        from src.agents.coin_risk_assessor import _load_cache
-        _risk_cache = {k: v for k, v in _load_cache().items()}
-    except Exception:
-        pass
-
-    pump_section = ""
-    if pump_alerts:
-        pump_lines = []
-        for c in [c for c in pump_alerts if c.get("symbol", "").upper() not in _open_set]:
-            sym  = c.get("symbol", "").upper()
-            ch7d = c.get("price_change_percentage_7d_in_currency") or 0
-            ch24 = c.get("price_change_percentage_24h") or 0
-            vol  = c.get("total_volume") or 0
-            mcap = c.get("market_cap") or 1
-            risk = _risk_cache.get(sym)
-            if risk and risk.category in ("ACTIVE_SCAM", "MANIPULATED_REAL"):
-                scam_tag = f" ⚠️ {risk.category} — {risk.reasoning[:60]} — NOT a genuine breakout"
-            else:
-                scam_tag = ""
-            pump_lines.append(
-                f"  {sym} | 7d={ch7d:+.1f}% | 24h={ch24:+.1f}%"
-                f" | vol/mcap={vol/mcap:.2f}x | price=${c.get('current_price', 0):,.6f}{scam_tag}"
-            )
-        pump_section = (
-            "\n\nPUMP ALERTS (>100% gain in 7d — could be real breakout OR pump & dump):\n"
-            + "\n".join(pump_lines)
-            + "\nFor each pump alert: if marked ACTIVE_SCAM or MANIPULATED_REAL, always assess as "
-            "'manipulation/pump-dump cycle — NOT a genuine breakout'. "
-            "For others, state if it looks like a genuine breakout or P&D, and why."
-        )
-
     prompt = f"""SHORT-TERM SCAN — top candidates with news (timeframe: 3–14 days max):
+
+IMPORTANT — BIAS VALIDATION:
+Each coin has a technical BIAS (LONG, SHORT, or SPOT) provided in the list below.
+Your job is to VALIDATE this bias using news, catalysts, and sentiment.
+
+Rules for Bias Validation:
+- LONG / SPOT: Supported by positive news (partnerships, mainnet, upgrades, ETF, institutional buy).
+- SHORT: Supported by negative news (hacks, lawsuits, regulatory crackdowns, major supply unlocks, narrative death).
+- If BIAS is SHORT but news is positive: Downgrade confidence to LOW or SKIP.
+- If BIAS is LONG but news is negative: Downgrade confidence to LOW or SKIP.
+- High ATH drop (95%+) is a SETUP for bounces (LONG), not a reason to avoid.
 
 IMPORTANT — RANKING ORDER IS MANDATORY:
 The coins below are pre-ranked by the scanner. Pick from the list IN ORDER (#1 first, then #2, etc.).
-Do NOT skip a higher-ranked coin for a lower-ranked one unless the higher-ranked coin has RSI >75.
-All coins with above_upper_BB or supply flags have already been removed — every coin below is clean.
+Do NOT skip a higher-ranked coin for a lower-ranked one unless the higher-ranked coin has RSI >75 (for Longs) or RSI <30 (for Shorts).
 If a coin has RSI >75, skip it and take the next one in order.
 
 {coins_text}
 
-Fear & Greed Index: {fg_value}/100 ({fg_label}).{news_section}{enrichment_section}{pump_section}
+Fear & Greed Index: {fg_value}/100 ({fg_label}).{news_section}{enrichment_section}
 
 SHORT-TERM SCORING — apply these adjustments before deciding:
 +3 pts: Concrete catalyst in news (0–7d ago): upgrade, ETF, institutional buy, mainnet, partnership, CME futures
@@ -303,14 +279,16 @@ NEVER set TP closer than 1.20x or SL tighter than 0.92x — minimum R:R is 2.5:1
 
 High ATH drop (95%+) is NOT a reason to avoid — it is a SETUP. ATL coins with vol and catalysts are prime bounces.
 
-Return this JSON object with EXACTLY 10 picks. Always pick 10 — never fewer.
-Rank all candidates from best to worst. If fewer than 10 have strong setups, fill remaining slots with LOW confidence picks.
-Having 10 picks is mandatory so the portfolio always has fresh candidates to open:
+Return this JSON object containing ONLY coins from the numbered candidate list above. 
+DO NOT invent coins. DO NOT pick coins from the PUMP ALERTS section or anywhere else.
+Only return as many picks as there are candidates provided (e.g., if there are only 2 candidates, return exactly 2 picks).
+Rank the candidates from best to worst.
 {{
   "picks": [
     {{
       "rank": 1,
       "coin": "SYMBOL",
+      "recommended_order": "LONG|SHORT|SPOT",
       "confidence": "high|medium|low",
       "qualifier": "INSTANT_QUALIFIER|NEWS_BOOST|OVERSOLD_VOL|BASE_SCORE",
       "key_signal": "the ONE signal that pushed this coin into top 3",
@@ -318,11 +296,10 @@ Having 10 picks is mandatory so the portfolio always has fresh candidates to ope
       "stop_loss": <number or null>,
       "take_profit": <number or null>,
       "timeframe": "e.g. 3-7 days or null",
-      "reasoning": "specific reasoning referencing which rule triggered, vol/mcap, RSI, catalyst",
+      "reasoning": "specific reasoning referencing bias validation and which rule triggered, vol/mcap, RSI, catalyst",
       "catalyst_type": "regulatory|tech_upgrade|partnership|narrative|institutional|token_economics|none",
       "catalyst_timing": "upcoming|just_happened|old_news|none",
       "setup_quality": "coiled_spring|accumulation|oversold_only|none",
-      "pump_assessment": "brief assessment of pump alerts, or null if none",
       "advisory_only": false
     }}
   ]
@@ -553,6 +530,10 @@ Having 10 picks is mandatory so the portfolio always has fresh candidates to ope
         conf_map = {"high": 0.8, "medium": 0.6, "low": 0.4}
         rec["confidence_score"] = conf_map.get((rec.get("confidence") or "low").lower(), 0.4)
         
+        # Forcefully retain the original Technical Bias (LONG/SHORT/SPOT).
+        # Groq's job is to validate the trade, not change the technical order type.
+        rec["recommended_order"] = matched_coin.get("recommended_order", "SPOT") if matched_coin else "SPOT"
+        
         return rec
 
     # Apply guards to all picks (up to 10)
@@ -611,8 +592,6 @@ Having 10 picks is mandatory so the portfolio always has fresh candidates to ope
         if rec.get("setup_quality") and rec["setup_quality"] != "none":
             print(f"     Setup:     {rec['setup_quality']}")
         print(f"     Reason:    {rec.get('reasoning', '?')[:120]}")
-        if rec.get("pump_assessment"):
-            print(f"     Pump:      {rec['pump_assessment'][:100]}")
     print("=" * 60)
 
     # ── Web research validation on pick #1 (actionable only) ──
