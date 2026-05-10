@@ -893,7 +893,8 @@ def close_whale_rider_position(sym: str, current_price: float, exit_reason: str 
             except (ValueError, KeyError):
                 pnl_pct = 0.0
 
-            status = "WIN" if pnl_pct >= 0 else "LOSS"
+            # Strict 24h strategy: WIN only if +10% or more.
+            status = "WIN" if pnl_pct >= 10.0 else "LOSS"
             note   = f" | EXIT_SIGNAL: {exit_reason}" if exit_reason else " | EXIT_SIGNAL"
             row["status"]        = status
             row["exit_price"]    = round(current_price, 8)
@@ -905,6 +906,16 @@ def close_whale_rider_position(sym: str, current_price: float, exit_reason: str 
             icon = "✅" if status == "WIN" else "❌"
             print(f"  {icon} Whale rider CLOSED {status} → {sym} {pnl_pct:+.1f}%"
                   + (f" ({exit_reason})" if exit_reason else ""))
+            
+            # Send Telegram alert for early exit
+            try:
+                from src.utils.telegram import send_telegram as _tg
+                _tg(f"{icon} <b>Whale Rider Early Exit — {sym}</b>\n"
+                    f"  Status: {status}\n"
+                    f"  PnL: {pnl_pct:+.1f}%\n"
+                    f"  Reason: {exit_reason or 'Momentum Slowing'}")
+            except Exception:
+                pass
             break
 
     if changed:
