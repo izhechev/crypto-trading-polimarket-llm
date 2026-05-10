@@ -336,7 +336,7 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
         "recommended_order": "LONG",
     })
     _write(rows)
-    print(f"  Whale ride logged â†’ {coin}")
+    print(f"  Whale ride logged -> {coin}")
 
 
 def close_whale_rider_position(sym: str, current_price: float, exit_reason: str = "") -> None:
@@ -360,11 +360,11 @@ def close_whale_rider_position(sym: str, current_price: float, exit_reason: str 
             row["current_price"] = round(current_price, 8)
             row["reasoning"]     = row.get("reasoning", "") + f" | EXIT: {exit_reason}"
             changed = True
-            icon = "âœ…" if status == "WIN" else "âŒ"
-            print(f"  {icon} Closed {status} â†’ {sym} {pnl_pct:+.1f}% ({exit_reason})")
+            icon = "✅" if status == "WIN" else "❌"
+            print(f"  {icon} Closed {status} -> {sym} {pnl_pct:+.1f}% ({exit_reason})")
             try:
                 from src.utils.telegram import send_telegram as _tg
-                _tg(f"{icon} <b>Position Closed ({status}) â€” {sym}</b>\n"
+                _tg(f"{icon} <b>Position Closed ({status}) — {sym}</b>\n"
                     f"  PnL: {pnl_pct:+.1f}%\n"
                     f"  Reason: {exit_reason or 'Strategy Exit'}")
             except Exception: pass
