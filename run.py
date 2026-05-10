@@ -1061,17 +1061,17 @@ def main():
         scheduler.add_job(
             run_scan_cycle,
             trigger="interval",
-            hours=3,
+            hours=1,
             kwargs={"exchange": args.exchange, "debate": args.debate},
             id="scan_cycle",
         )
         scheduler.add_job(
             run_whale_check,
             trigger="interval",
-            hours=24,
+            minutes=15,
             id="whale_check",
         )
-        print(f"\n  Scheduler running — full scan every 3h, whale check every 24h. Ctrl+C to stop.\n")
+        print(f"\n  Scheduler running — full scan every 1h, whale check every 15m. Ctrl+C to stop.\n")
         try:
             scheduler.start()
         except KeyboardInterrupt:

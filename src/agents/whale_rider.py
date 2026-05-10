@@ -451,10 +451,39 @@ def send_whale_ride_alerts(
     
     # ── High-Conviction Batch Message ─────────────────────────────────────────
     hc_msg = ""
-    if hc_lines:
+    lines = []
+    if high_conviction:
         hc_msg = "🔥 <b>HIGH-CONVICTION WHALE SIGNALS</b>\n" + \
                  "<pre>TICKER | mcap  | volM | v/mc | 24h%  | 7d%   | ATH% | score</pre>\n" + \
                  "\n".join(hc_lines) + "\n\n"
+                 
+        for rank, c in enumerate(high_conviction[:5], 1):
+            sym         = c["symbol"]
+            name        = c.get("name", sym)
+            stage       = c["stage"]
+            price_usd   = c["price"]
+            ch24        = c["change_24h"]
+            ch7d        = c.get("change_7d", 0)
+            vol_ratio   = c.get("vol_ratio", 0)
+            vol_mcap    = c.get("vol_mcap", 0)
+            vol_usd     = c.get("vol_usd", 0)
+            avg_vol_usd = c.get("avg_vol_usd", 0)
+            mcap        = c.get("mcap", 0)
+            ath_chg     = c.get("ath_change", 0)
+            cold        = " ❄️" if c.get("cold_start") else ""
+            stage_icon  = {"PRE": "🔵", "EARLY": "🟢", "MID": "🟡"}.get(stage, "⚪")
+            mcap_str    = _fmt_mcap(mcap) if mcap else "?"
+            vol_str     = _fmt_mcap(vol_usd) if vol_usd else "?"
+            avg_str     = _fmt_mcap(avg_vol_usd) if avg_vol_usd else "?"
+            ath_str     = f"{ath_chg:+.0f}% from ATH" if ath_chg else ""
+            _coin_id = c.get("coin_id", "")
+            _link    = f' <a href="https://www.coingecko.com/en/coins/{_coin_id}">CG</a>' if _coin_id else ""
+            lines.append(
+                f"  #{rank} <b>{sym}</b> ({name}) {stage_icon} {stage}{cold}{_link}\n"
+                f"     {_fmt_price(price_usd)}  24h {ch24:+.1f}%  7d {ch7d:+.0f}%\n"
+                f"     vol {vol_str} ({vol_ratio:.1f}x avg {avg_str})  vol/mcap {vol_mcap:.2f}x\n"
+                f"     mcap {mcap_str} | {ath_str}"
+            )
     
     # ── Send Message ──
     # Count total open positions for budget context
@@ -470,8 +499,9 @@ def send_whale_ride_alerts(
     if hc_msg:
         batch_msg = (
             hc_msg +
-            f"🐋 <b>VALUABLE WHALE RIDES</b>\n{fg_line}\n" +
-            "\n  ⚠️ Manual trade only — invest $100 max per signal"
+            f"🐋 <b>VALUABLE WHALE RIDES</b>\n{fg_line}\n\n" +
+            "\n\n".join(lines) +
+            "\n\n  ⚠️ Manual trade only — invest $100 max per signal"
         )
         try:
             send_telegram(batch_msg)
