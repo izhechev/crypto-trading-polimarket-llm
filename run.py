@@ -695,15 +695,24 @@ def run_scan_cycle(
 
     # Log only coins that passed Groq pre-filter — never log pre-filter rejects (e.g. ABOVE_UPPER BB).
     if not skip_groq and new_candidates and groq_candidates:
-        log_scanner_results(groq_candidates, fg.get("value", 0))
+        # Generic logging disabled; scanner.py now handles auto-logging of high-conviction picks
+        pass
 
-    # Filter recs to only symbols that actually went through the Groq pre-filter.
-    # This is the definitive guard: if a coin wasn't in groq_candidates it can't
-    # be a valid pick — catches hallucinations AND whale-ride coins that Groq
-    # somehow returns despite being excluded from the candidate list.
-    # Exception: fallback picks were never logged (Groq was down) — keep them as-is.
-    _gc_syms = {r.get("symbol", "").upper() for r in groq_candidates}
-    recs = [r for r in recs if r.get("_groq_fallback") or r.get("coin", "").upper() in _gc_syms]
+    # High-conviction filtering: only show BUY signals from Groq with confidence >= 60%
+    best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.6]
+    
+    if best_picks:
+        print_header("HIGH-CONVICTION OPPORTUNITIES")
+        for i, p in enumerate(best_picks, 1):
+            _side = p.get("recommended_order", "SPOT")
+            _conf = p.get("confidence", "LOW")
+            print(f"  {i}. 🟢 {_side} | {p['coin']} (Conf: {_conf}) | Price: ${p.get('entry_price', 0):.4f}")
+            print(f"     💬 {p.get('reasoning', '')[:120]}...")
+    else:
+        print("\n  ℹ️  Groq found no high-conviction BUY opportunities this cycle.")
+
+    # Filter recs for Telegram to only show Best Picks
+    recs_for_display = best_picks
 
     # Stamp Groq's rank + qualifier + key_signal onto each pick's CSV row
     for rec in recs:
@@ -1103,10 +1112,10 @@ def main():
         scheduler.add_job(
             run_whale_check,
             trigger="interval",
-            hours=24,
+            minutes=15,
             id="whale_check",
         )
-        print(f"\n  Crypto scheduler running — full scan every 3h, whale check every 24h. Ctrl+C to stop.\n")
+        print(f"\n  Crypto scheduler running — full scan every 3h, whale check every 15m. Ctrl+C to stop.\n")
         try:
             scheduler.start()
         except KeyboardInterrupt:
