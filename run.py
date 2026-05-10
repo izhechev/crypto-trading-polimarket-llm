@@ -490,8 +490,8 @@ def run_scan_cycle(
     bar = "█" * bar_len + "░" * (50 - bar_len)
     print(f"  [{bar}] {fg['value']}/100 — {fg['label']}")
 
-    # Scanner - returns only valuable_wr
-    top10, pump_alerts, whale_rides, quality_count, tavily_catalysts = run_smart_scanner(exchange=exchange, fear_greed=fg, open_count=_open_count)
+    # Scanner - returns only valuable_wr + bundled categories
+    top10, pump_alerts, whale_rides, quality_count, tavily_catalysts, categories = run_smart_scanner(exchange=exchange, fear_greed=fg, open_count=_open_count)
 
     if not top10:
         print("  No results from scanner — skipping analysis.")
@@ -654,21 +654,62 @@ def run_scan_cycle(
         # Generic logging disabled; scanner.py now handles auto-logging of high-conviction picks
         pass
 
-    # High-conviction filtering: only show BUY signals from Groq with confidence >= 60%
+    # High-conviction filtering & Auto-Logging
     best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.6]
     
+    from src.utils.logger import log_recommendation, log_whale_ride, _read as _log_read
+    _all_rows = _log_read()
+    _open_syms = {r.get("coin", "").upper() for r in _all_rows if r.get("status") == "OPEN"}
+
     if best_picks:
         print_header("HIGH-CONVICTION OPPORTUNITIES")
         for i, p in enumerate(best_picks, 1):
+            _sym  = p["coin"].upper()
             _side = p.get("recommended_order", "SPOT")
             _conf = p.get("confidence", "LOW")
-            print(f"  {i}. 🟢 {_side} | {p['coin']} (Conf: {_conf}) | Price: ${p.get('entry_price', 0):.4f}")
+            print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}) | Price: ${p.get('entry_price', 0):.4f}")
             print(f"     💬 {p.get('reasoning', '')[:120]}...")
+
+            # Auto-log if not already tracking
+            if _sym not in _open_syms:
+                _ep = float(p.get("entry_price") or 0)
+                if _ep > 0:
+                    _side = p.get("recommended_order", "SPOT")
+                    if _side == "SHORT":
+                        _tp = _ep * 0.90
+                        _sl = _ep * 1.10
+                    else:
+                        _tp = _ep * 1.10
+                        _sl = _ep * 0.90
+                    
+                    _rec_to_log = {
+                        "coin":        _sym,
+                        "coin_id":     p.get("coin_id", ""),
+                        "entry_price": round(_ep, 8),
+                        "stop_loss":   round(_sl, 8),
+                        "take_profit": round(_tp, 8),
+                        "timeframe":   "24h Window",
+                        "reasoning":   f"Post-Analysis BUY signal. Conf: {_conf}.",
+                        "recommended_order": _side,
+                    }
+                    log_recommendation(_rec_to_log, fg.get("value", 50))
+                    _open_syms.add(_sym)
     else:
         print("\n  ℹ️  Groq found no high-conviction BUY opportunities this cycle.")
 
+    # 2. Valuable Whale Rides (Scanner already returns filtered valuable_wr)
+    for wr in whale_rides:
+        _sym = wr.get("symbol", "").upper()
+        if _sym not in _open_syms:
+            log_whale_ride(wr, fg.get("value", 50))
+            _open_syms.add(_sym)
+
     # Filter recs for Telegram to only show Best Picks
     recs_for_display = best_picks
+
+    # Stamp Groq's rank + qualifier + key_signal onto each pick's CSV row
+    # ... (rest of function remains as is)
+
 
     # Stamp Groq's rank + qualifier + key_signal onto each pick's CSV row
     for rec in recs:
