@@ -437,11 +437,17 @@ def send_whale_ride_alerts(
     high_conviction.sort(key=lambda x: -x["hc_score"])
     
     hc_lines = []
-    for c in high_conviction:
+    for rank, c in enumerate(high_conviction, 1):
         hc_lines.append(
             f"  {c['symbol']:6} | {_fmt_mcap(c['mcap']):>5} | {c['vol_ratio']:>4.1f}x | {c['vol_mcap']:>4.2f}x | "
             f"{c['change_24h']:>+5.1f}% | {c['change_7d']:>+5.1f}% | {c['ath_change']:>4.0f}% | {c['hc_score']}/8"
         )
+    
+    if high_conviction:
+        print(f"\n  🔥 HIGH-CONVICTION WHALE SIGNALS")
+        print("  <pre>TICKER | mcap  | volM | v/mc | 24h%  | 7d%   | ATH% | score</pre>")
+        for line in hc_lines:
+            print(line)
     
     hc_msg = ""
     if hc_lines:
@@ -449,9 +455,10 @@ def send_whale_ride_alerts(
                  "<pre>TICKER | mcap  | volM | v/mc | 24h%  | 7d%   | ATH% | score</pre>\n" + \
                  "\n".join(hc_lines) + "\n\n"
     elif candidates:
-        hc_msg = "❌ No high-conviction signals this round.\n\n"
+        # hc_msg = "❌ No high-conviction signals this round.\n\n"
+        pass
 
-    # ── Original Batch Logic ──────────────────────────────────────────────────
+    # ── Original Batch Logic (REMOVED generic list, only sending HC) ──────────
     # Count total open positions — cap auto-opens at 50 total (Normal market)
     _open_count = 0
     try:
@@ -466,49 +473,15 @@ def send_whale_ride_alerts(
     _auto_opened         = 0
     fg_line  = f"\n⚠️ F&amp;G = {fg_value} ({'Neutral' if is_neutral else 'Fear'}) — {'Aggressive' if is_neutral else 'Conservative'} mode"
 
-    top10 = candidates[:10]
-    lines = []
-    for rank, c in enumerate(top10, 1):
-        sym         = c["symbol"]
-        name        = c.get("name", sym)
-        stage       = c["stage"]
-        price_usd   = c["price"]
-        ch24        = c["change_24h"]
-        ch7d        = c.get("change_7d", 0)
-        vol_ratio   = c.get("vol_ratio", 0)
-        vol_mcap    = c.get("vol_mcap", 0)
-        vol_usd     = c.get("vol_usd", 0)
-        avg_vol_usd = c.get("avg_vol_usd", 0)
-        mcap        = c.get("mcap", 0)
-        circ_pct    = c.get("circ_pct", 100)
-        ath_chg     = c.get("ath_change", 0)
-        cold        = " ❄️" if c.get("cold_start") else ""
-        stage_icon  = {"PRE": "🔵", "EARLY": "🟢", "MID": "🟡"}.get(stage, "⚪")
-        mcap_str    = _fmt_mcap(mcap) if mcap else "?"
-        vol_str     = _fmt_mcap(vol_usd) if vol_usd else "?"
-        avg_str     = _fmt_mcap(avg_vol_usd) if avg_vol_usd else "?"
-        ath_str     = f"{ath_chg:+.0f}% from ATH" if ath_chg else ""
-        circ_str    = f"circ {circ_pct:.0f}%" if circ_pct < 100 else ""
-        extra       = "  |  ".join(x for x in (ath_str, circ_str) if x)
-        _coin_id = c.get("coin_id", "")
-        _link    = f' <a href="https://www.coingecko.com/en/coins/{_coin_id}">CG</a>' if _coin_id else ""
-        lines.append(
-            f"  #{rank} <b>{sym}</b> ({name}) {stage_icon} {stage}{cold}{_link}\n"
-            f"     {_fmt_price(price_usd)}  24h {ch24:+.1f}%  7d {ch7d:+.0f}%\n"
-            f"     vol {vol_str} ({vol_ratio:.1f}x avg {avg_str})  vol/mcap {vol_mcap:.2f}x\n"
-            f"     mcap {mcap_str}" + (f"  |  {extra}" if extra else "")
-        )
-
-    if lines or hc_msg:
+    # Only send message if there is actual High-Conviction content
+    if hc_msg:
         batch_msg = (
             hc_msg +
-            f"🐋 <b>WHALE RIDE DETECTED — TOP {len(top10)}</b>{fg_line}\n\n"
-            + "\n\n".join(lines)
-            + "\n\n  ⚠️ Manual trade only — invest $100 max per signal"
+            f"🐋 <b>VALUABLE WHALE RIDES</b>{fg_line}\n"
+            + "\n  ⚠️ Manual trade only — invest $100 max per signal"
         )
         try:
             send_telegram(batch_msg)
-            # print(f"  🐋 WHALE RIDE batch sent: {', '.join(c['symbol'] for c in top10)}")
         except Exception as e:
             print(f"  ⚠️  Whale ride batch alert failed: {e}")
 

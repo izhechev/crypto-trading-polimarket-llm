@@ -381,7 +381,6 @@ def print_daily_activity() -> None:
     print("\n  📊  TODAY'S ACTIVITY")
     print(f"  Closed WIN:  {', '.join(f'{r['coin']} {float(r['pnl_pct']):+.1f}%' for r in wins) or 'none'}")
     print(f"  Closed LOSS: {', '.join(f'{r['coin']} {float(r['pnl_pct']):+.1f}%' for r in losses) or 'none'}")
-
 def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] | None = None, fear_greed: dict | None = None) -> None:
     rows = _read()
     open_rows = [r for r in rows if r.get("status") == "OPEN"]
@@ -392,9 +391,45 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
             curr = float(r.get("current_price") or entry)
             is_short = r.get("recommended_order") == "SHORT"
             pnl = ((entry - curr) if is_short else (curr - entry)) / entry * 100 if entry > 0 else 0
+            icon = "+" if pnl >= 0 else "-"
             side = r.get("recommended_order", "LONG")
             print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}% ({side})  entry {entry:.4f}  now {curr:.4f}")
         except Exception: pass
+
+    # ── Most Valuable Picks (Scanner) ──
+    if top10:
+        longs  = [r for r in top10 if r.get("recommended_order") == "LONG"]
+        shorts = [r for r in top10 if r.get("recommended_order") == "SHORT"]
+        spots  = [r for r in top10 if r.get("recommended_order") == "SPOT"]
+        
+        if longs or shorts or spots:
+            print(f"\n  MOST VALUABLE SCANNER PICKS:")
+            if longs:
+                print("    🚀 LONGS:")
+                for i, r in enumerate(longs[:5], 1):
+                    print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
+            if shorts:
+                print("    📉 SHORTS:")
+                for i, r in enumerate(shorts[:5], 1):
+                    print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
+            if spots:
+                print("    💰 SPOTS:")
+                for i, r in enumerate(spots[:5], 1):
+                    print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
+        else:
+            print("\n  ℹ️  No high-conviction scanner picks this round.")
+
+    # ── Valuable Whale Rides ──
+    if whale_rides:
+        print(f"\n  🐋  VALUABLE WHALE RIDE CANDIDATES:")
+        for i, wr in enumerate(whale_rides[:5], 1):
+            sym = wr.get("symbol", "?")
+            cyc = wr.get("cycle_number", "?")
+            score = wr.get("hc_score", "?")
+            print(f"    {i:2}. {sym:8s} (Cycle #{cyc} | Score {score}/8)")
+    else:
+        print("\n  🐋  No high-conviction whale rides this round.")
+
 
 def print_track_record() -> None:
     rows = _read()
