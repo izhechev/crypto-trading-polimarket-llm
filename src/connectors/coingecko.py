@@ -350,6 +350,36 @@ def fetch_fear_greed() -> dict:
     return result
 
 
+def fetch_coin_list() -> list[dict]:
+    """Fetch the full list of supported coins from CoinGecko."""
+    cache_key = "full_coin_list"
+    cached = _get_cached(cache_key, ttl=3600 * 24) # Cache for 24h as it doesn't change often
+    if cached:
+        return cached
+
+    url = f"{_base_url()}/coins/list"
+    params = {}
+    
+    # Auth for Demo tier
+    headers = _headers()
+    try:
+        import config
+        if config.COINGECKO_API_KEY and "pro-api" not in _base_url():
+            params["x_cg_demo_api_key"] = config.COINGECKO_API_KEY
+    except Exception: pass
+
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = _cg_get(client, url, params=params, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            _set_cache(cache_key, data)
+            return data
+    except Exception as e:
+        print(f"  ⚠️  CoinGecko /coins/list fetch failed: {e}")
+        return []
+
+
 if __name__ == "__main__":
     print("=== Fetching prices ===")
     prices = fetch_prices(["bitcoin", "injective-protocol", "render-token", "polkadot", "ethereum"])
