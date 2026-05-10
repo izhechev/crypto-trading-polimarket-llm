@@ -559,8 +559,8 @@ def run_scan_cycle(
             print(f"  ⚠️  Groq failed: {e}")
 
     # ── High-Conviction Best Picks ──
-    # ONLY show and log BUY signals with confidence >= 60%
-    best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.6]
+    # ONLY show and log BUY signals with confidence >= 50% (MEDIUM+)
+    best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.5]
     
     if best_picks:
         print_header("HIGH-CONVICTION OPPORTUNITIES")

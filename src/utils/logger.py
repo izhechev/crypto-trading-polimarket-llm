@@ -389,11 +389,20 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
         try:
             entry = float(r.get("entry_price") or 0)
             curr = float(r.get("current_price") or entry)
+            
+            # Age calculation
+            try:
+                entry_dt = datetime.strptime(r["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+                hrs = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
+                age_str = f"{hrs:.1f}h" if hrs < 24 else f"{hrs/24:.1f}d"
+            except Exception: age_str = "?h"
+
             is_short = r.get("recommended_order") == "SHORT"
             pnl = ((entry - curr) if is_short else (curr - entry)) / entry * 100 if entry > 0 else 0
+            
             icon = "+" if pnl >= 0 else "-"
-            side = r.get("recommended_order", "LONG")
-            print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}% ({side})  entry {entry:.4f}  now {curr:.4f}")
+            side = r.get("recommended_order", "SPOT")
+            print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}% ({side})  [{age_str}]  entry {entry:.4f}  now {curr:.4f}")
         except Exception: pass
 
     # ── Most Valuable Picks (Scanner) ──

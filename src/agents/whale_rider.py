@@ -568,14 +568,16 @@ def send_whale_ride_alerts(
                 and _auto_opened < _MAX_WHALE_AUTO
                 and _open_count < _MAX_TOTAL_POSITIONS
             )
-            try:
-                from src.utils.logger import log_whale_rider_alert
-                _was_logged = log_whale_rider_alert(c, fg_value, open_position=_should_open)
-                if _should_open and _was_logged:
+            if _should_open:
+                try:
+                    from src.utils.logger import log_whale_ride
+                    # Map 'price' to 'entry' for log_whale_ride compatibility
+                    c["entry"] = c.get("price", 0)
+                    log_whale_ride(c, fg_value)
                     _auto_opened += 1
                     _open_count   += 1
-            except Exception:
-                pass
+                except Exception as _e:
+                    print(f"  ⚠️  Whale auto-open failed for {sym}: {_e}")
 
     data["active"]     = active
     data["pre_alerts"] = pre_alerts
