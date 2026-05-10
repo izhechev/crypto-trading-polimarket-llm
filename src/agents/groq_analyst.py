@@ -543,8 +543,15 @@ Having 10 picks is mandatory so the portfolio always has fresh candidates to ope
             quality = "🟡 SPECULATIVE"
         else:
             quality = "🔴 WEAK"
+        
         rec["quality_label"] = quality
         rec["scanner_score"] = scanner_score
+        
+        # ── Unified logic for run.py filtering ──
+        rec["verdict"] = "BUY"
+        conf_map = {"high": 0.8, "medium": 0.6, "low": 0.4}
+        rec["confidence_score"] = conf_map.get((rec.get("confidence") or "low").lower(), 0.4)
+        
         return rec
 
     # Apply guards to all picks (up to 10)

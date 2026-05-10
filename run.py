@@ -499,17 +499,10 @@ def run_scan_cycle(
         print_track_record()
         return
 
-    # News for all top 10 — Tavily AI (if key set) or Google News RSS fallback.
-    # fetch_news_for_coins is also called inside analyze_with_groq; this result
-    # is used for the console summary and passed in to avoid a double fetch.
+    # News for all top 10
     import config as _cfg
     from src.connectors.web_research import fetch_news_for_coins
-    _news_src = "Tavily AI" if _cfg.TAVILY_API_KEY else "Google News RSS"
-    # print(f"\n  📰  Fetching per-coin news for top 10 ({_news_src})...")
     per_coin_news_pre = fetch_news_for_coins(top10, limit_per_coin=5)
-    found_count = sum(1 for v in per_coin_news_pre.values() if v)
-    # print(f"  ✅  News found for {found_count}/{len(top10)} coins")
-    # Flatten to a text block for the Groq prompt header (per-coin detail added inside analyze_with_groq)
     news_lines: list[str] = []
     for sym, items in per_coin_news_pre.items():
         for it in items[:2]:
@@ -517,94 +510,38 @@ def run_scan_cycle(
             news_lines.append(f"  {sym}: {age_tag} {it.get('title','')[:90]}")
     news_text = "\n".join(news_lines)
 
-    # Sentiment analysis for top 10 coins — also adjusts scanner scores
+    # Sentiment analysis
     sentiment_text = ""
     try:
         from src.agents.sentiment_analyst import analyze_sentiment_batch, format_for_prompt as fmt_sentiment
-        all_symbols   = [r["symbol"]       for r in top10]
-        all_names     = [r.get("name", "") for r in top10]
-        sentiments = analyze_sentiment_batch(all_symbols, coin_names=all_names, fear_greed=fg)
+        all_symbols = [r["symbol"] for r in top10]
+        sentiments = analyze_sentiment_batch(all_symbols, coin_names=[r.get("name","") for r in top10], fear_greed=fg)
         sentiment_text = fmt_sentiment(sentiments)
         if sentiment_text:
-            # print_header("SENTIMENT ANALYSIS")
             _SENTIMENT_DELTA = {"VERY_BULLISH": 1, "BULLISH": 0, "NEUTRAL": 0, "BEARISH": 0, "VERY_BEARISH": -1}
             for sym, s in sentiments.items():
                 delta = _SENTIMENT_DELTA.get(s.social_sentiment, 0)
-                delta_str = f"  [{s.social_sentiment} score {delta:+d}]" if delta != 0 else ""
-                # print(f"  {sym:8s} {s.social_sentiment:12s} | F&G: {s.fear_greed}/100 | news: {s.news_sentiment:+.2f}{delta_str}")
                 if delta != 0:
                     for r in top10:
                         if r["symbol"].upper() == sym.upper():
-                            r["score"] += delta
-                            r["reasons"].append(f"sentiment {s.social_sentiment} ({delta:+d})")
-                            break
-            # Re-sort top10 after sentiment adjustments (same tiebreaker as scanner)
-            top10.sort(
-                key=lambda x: (
-                    x["score"],
-                    x.get("clean_setup_tb", 0),
-                    x.get("change_24h", 0),
-                    x.get("vol_mcap", 0),
-                    x.get("proven_wins_tb", 0),
-                    1 if x.get("sec_commodity") else 0,
-                    x.get("supply_capped_tb", 0),
-                    x.get("momentum_stall_tb", 0),
-                ),
-                reverse=True,
-            )
-            # Refresh quality_count after sentiment may have boosted some scores
-            quality_count = sum(1 for r in top10 if r.get("score", 0) >= 2)
-    except Exception as e:
-        # print(f"  Warning: sentiment analysis failed: {e}")
-        pass
+                            r["score"] += delta; break
+            top10.sort(key=lambda x: (x["score"], x.get("change_24h", 0)), reverse=True)
+    except Exception: pass
 
-    # Enrichment data (CMC, Etherscan, DeFiLlama, CoinPaprika, Polymarket)
-    # print_header("ENRICHMENT DATA")
+    # Enrichment
     all_symbols = [r["symbol"] for r in top10]
     enrichment_text = fetch_enrichment(all_symbols)
-    if not enrichment_text:
-        # print("  No enrichment data available")
-        pass
 
-    # ── DATA COLLECTION MODE: always open picks if score ≥ 2, no position cap ──
-    from src.utils.logger import _read as _log_read, update_groq_rank
-    _log_rows = _log_read()
-    _already_open_scanner = {
-        r.get("coin", "").upper()
-        for r in _log_rows
-        if r.get("type", "") in ("SCANNER", "") and r.get("status") == "OPEN"
-    }
-    _already_open_whale = {
-        r.get("coin", "").upper()
-        for r in _log_rows
-        if r.get("type") == "WHALE_RIDE" and r.get("status") == "OPEN"
-    }
-    _already_open_syms = _already_open_scanner | _already_open_whale
-    _open_quality_positions = len(_already_open_scanner)
-
-    # Log pre-filter removals for coins that are open as whale rides
-    _top10_syms = {r["symbol"].upper() for r in top10}
-    # for _wr_sym in _already_open_whale & _top10_syms:
-    #     print(f"  Pre-filter removed: {_wr_sym} (already OPEN as whale_ride)")
-
-    # Split top10 into already-open vs genuinely new candidates
-    new_candidates    = [r for r in top10 if r["symbol"].upper() not in _already_open_syms]
-    quality_count_new = sum(1 for r in new_candidates if r["score"] >= 2)
+    # Groq Analysis
+    from src.utils.logger import _read as _log_read, log_recommendation, log_whale_ride
+    _all_rows = _log_read()
+    _already_open_syms = {r.get("coin", "").upper() for r in _all_rows if r.get("status") == "OPEN"}
+    
+    new_candidates = [r for r in top10 if r["symbol"].upper() not in _already_open_syms]
     recs: list[dict] = []
-
-    # Run Groq whenever there are non-open candidates — even low-scoring ones.
-    # Groq pre-filter (Step 0G) already gates on score ≤ 1; let Groq decide.
-    skip_groq = False
-    if not new_candidates:
-        # print(f"\n  ⚠️  NO NEW PICKS — all top10 coins are already OPEN positions.")
-        skip_groq = True
-    elif quality_count_new < 3:
-        # print(f"\n  ℹ️  Few coins score ≥2 ({quality_count_new}) — passing all candidates to Groq for evaluation.")
-        pass
-
-    groq_candidates: list[dict] = []   # coins that passed Groq pre-filter — logged to CSV
-    _groq_failed = False               # True = rate limit / network error, not "no picks"
-    if not skip_groq:
+    groq_candidates = []
+    
+    if new_candidates:
         combined_context = "\n\n".join(filter(None, [enrichment_text, sentiment_text]))
         print_header("GROQ LLM ANALYSIS")
         try:
@@ -619,48 +556,12 @@ def run_scan_cycle(
             recs_raw, groq_candidates = groq_result if isinstance(groq_result, tuple) else (groq_result, top10)
             recs = recs_raw if isinstance(recs_raw, list) else ([recs_raw] if recs_raw else [])
         except Exception as e:
-            print(f"  ⚠️  Groq analysis failed: {e} — falling back to raw scanner top 3 by news")
-            _groq_failed = True
-            # Fallback: sort new non-open scanner picks by (has news, score) desc — pick top 3
-            _fb_pool = [r for r in top10 if r["symbol"].upper() not in _already_open_syms]
-            def _fb_sort(r):
-                sym = r["symbol"].upper()
-                has_news = bool((tavily_catalysts or {}).get(sym) or per_coin_news_pre.get(sym))
-                return (1 if has_news else 0, r["score"])
-            _fb_pool.sort(key=_fb_sort, reverse=True)
-            _fallback_picks = _fb_pool[:3]
-            for _fp in _fallback_picks:
-                _sym = _fp["symbol"].upper()
-                _cat = (tavily_catalysts or {}).get(_sym, "")
-                if not _cat:
-                    _items = per_coin_news_pre.get(_sym, [])
-                    _cat = (_items[0].get("title") or "") if _items else ""
-                recs.append({
-                    "coin":        _sym,
-                    "coin_id":     _fp.get("coin_id", ""),
-                    "rank":        _fallback_picks.index(_fp) + 1,
-                    "confidence":  "LOW",
-                    "qualifier":   "GROQ_FALLBACK",
-                    "reasoning":   f"scanner score {_fp['score']} pts",
-                    "entry_price": _fp.get("price"),
-                    "stop_loss":   None,
-                    "take_profit": None,
-                    "_groq_fallback": True,
-                    "_fallback_news": _cat[:120] if _cat else "",
-                })
+            print(f"  ⚠️  Groq failed: {e}")
 
-    # Log only coins that passed Groq pre-filter — never log pre-filter rejects (e.g. ABOVE_UPPER BB).
-    if not skip_groq and new_candidates and groq_candidates:
-        # Generic logging disabled; scanner.py now handles auto-logging of high-conviction picks
-        pass
-
-    # High-conviction filtering & Auto-Logging
+    # ── High-Conviction Best Picks ──
+    # ONLY show and log BUY signals with confidence >= 60%
     best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.6]
     
-    from src.utils.logger import log_recommendation, log_whale_ride, _read as _log_read
-    _all_rows = _log_read()
-    _open_syms = {r.get("coin", "").upper() for r in _all_rows if r.get("status") == "OPEN"}
-
     if best_picks:
         print_header("HIGH-CONVICTION OPPORTUNITIES")
         for i, p in enumerate(best_picks, 1):
@@ -670,272 +571,69 @@ def run_scan_cycle(
             print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}) | Price: ${p.get('entry_price', 0):.4f}")
             print(f"     💬 {p.get('reasoning', '')[:120]}...")
 
-            # Auto-log if not already tracking
-            if _sym not in _open_syms:
+            if _sym not in _already_open_syms:
                 _ep = float(p.get("entry_price") or 0)
                 if _ep > 0:
-                    _side = p.get("recommended_order", "SPOT")
-                    if _side == "SHORT":
-                        _tp = _ep * 0.90
-                        _sl = _ep * 1.10
-                    else:
-                        _tp = _ep * 1.10
-                        _sl = _ep * 0.90
+                    if _side == "SHORT": _tp, _sl = _ep * 0.90, _ep * 1.10
+                    else: _tp, _sl = _ep * 1.10, _ep * 0.90
                     
-                    _rec_to_log = {
-                        "coin":        _sym,
-                        "coin_id":     p.get("coin_id", ""),
-                        "entry_price": round(_ep, 8),
-                        "stop_loss":   round(_sl, 8),
-                        "take_profit": round(_tp, 8),
-                        "timeframe":   "24h Window",
-                        "reasoning":   f"Post-Analysis BUY signal. Conf: {_conf}.",
+                    log_recommendation({
+                        "coin": _sym, "coin_id": p.get("coin_id", ""),
+                        "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
+                        "timeframe": "24h Window", "reasoning": f"BUY Conf: {_conf}",
                         "recommended_order": _side,
-                    }
-                    log_recommendation(_rec_to_log, fg.get("value", 50))
-                    _open_syms.add(_sym)
+                    }, fg.get("value", 50))
+                    _already_open_syms.add(_sym)
     else:
-        print("\n  ℹ️  Groq found no high-conviction BUY opportunities this cycle.")
+        print("\n  ℹ️  No high-conviction BUY opportunities this cycle.")
 
-    # 2. Valuable Whale Rides (Scanner already returns filtered valuable_wr)
+    # Auto-log valuable Whale Rides
     for wr in whale_rides:
         _sym = wr.get("symbol", "").upper()
-        if _sym not in _open_syms:
+        if _sym not in _already_open_syms:
             log_whale_ride(wr, fg.get("value", 50))
-            _open_syms.add(_sym)
+            _already_open_syms.add(_sym)
 
-    # Filter recs for Telegram to only show Best Picks
-    recs_for_display = best_picks
+    # ── Telegram Final Report ──
+    # Build a single unified message for High-Conviction only
+    msg = f"<b>💎 BEST OPPORTUNITIES — F&G {fg['value']}/100</b>\n"
+    
+    if best_picks:
+        msg += "\n🚀 <b>HIGH-CONVICTION BUY SIGNALS:</b>\n"
+        for i, p in enumerate(best_picks, 1):
+            _side = p.get("recommended_order", "SPOT")
+            msg += f"  {i}. <b>{p['coin']}</b> ({_side}) @ ${p.get('entry_price', 0):.4f} (Conf: {p.get('confidence','?')})\n"
+    
+    if whale_rides:
+        msg += "\n🐋 <b>VALUABLE WHALE RIDES:</b>\n"
+        for wr in whale_rides[:3]:
+            msg += f"  🐋 <b>{wr['symbol']}</b> (Cycle #{wr['cycle_number']} | Score {wr.get('hc_score','?')})\n"
 
-    # Stamp Groq's rank + qualifier + key_signal onto each pick's CSV row
-    # ... (rest of function remains as is)
+    if not best_picks and not whale_rides:
+        msg += "\n<i>No high-conviction opportunities found this cycle.</i>"
 
+    send_telegram(msg)
 
-    # Stamp Groq's rank + qualifier + key_signal onto each pick's CSV row
-    for rec in recs:
-        rec_sym = rec.get("coin", "").upper()
-        _rank   = rec.get("rank") or (recs.index(rec) + 1)
-        # Apply to both scanner and whale_rider positions (Bug fix: Problem 3)
-        update_groq_rank(
-            rec_sym,
-            groq_rank  = int(_rank),
-            qualifier  = rec.get("qualifier", "BASE_SCORE"),
-            key_signal = rec.get("key_signal") or (rec.get("reasoning") or "")[:80],
-        )
-        from src.utils.logger import update_whale_rank
-        update_whale_rank(
-            rec_sym,
-            groq_rank  = int(_rank),
-            qualifier  = rec.get("qualifier", "BASE_SCORE"),
-            key_signal = rec.get("key_signal") or (rec.get("reasoning") or "")[:80],
-        )
-
-    msg: str = ""   # Telegram message built here, sent after stock + Polymarket data
-    debate_verdict = None
-
-    # Save Groq's picks for Telegram BEFORE filtering by logged status.
-    # Even if quality_count < 3 (positions not logged), we still want to
-    # show the top 3 scanner picks in Telegram with their confidence level.
-    recs_for_display = list(recs)
-
-    if recs:
-        # Enrich each rec with coin_id
-        for rec in recs:
-            rec_symbol = rec.get("coin", "").upper()
-            matched = next((r for r in top10 if r["symbol"] == rec_symbol), None)
-            if matched:
-                rec["coin_id"] = matched["coin_id"]
-
-        # Multi-agent debate on pick #1 only
-        rec1 = recs[0]
-        rec1_symbol = rec1.get("coin", "").upper()
-        matched1 = next((r for r in top10 if r["symbol"] == rec1_symbol), None)
-        if debate and matched1:
-            try:
-                from src.agents.debate import run_debate
-                debate_verdict = run_debate(
-                    coin_data=matched1,
-                    sentiment_text=sentiment_text,
-                    enrichment_text=enrichment_text,
-                    fear_greed=fg,
-                )
-                if debate_verdict:
-                    if debate_verdict.get("verdict") == "BUY":
-                        rec1["stop_loss"]   = debate_verdict.get("stop_loss")   or rec1.get("stop_loss")
-                        rec1["take_profit"] = debate_verdict.get("take_profit") or rec1.get("take_profit")
-                        rec1["entry_price"] = debate_verdict.get("entry_price") or rec1.get("entry_price")
-                        rec1["reasoning"] = (
-                            f"[Debate verdict: {debate_verdict['verdict']} "
-                            f"({debate_verdict.get('confidence', 0):.0%} confidence)]\n"
-                            f"{debate_verdict.get('reasoning', '')}\n\n"
-                            f"Key risk: {debate_verdict.get('key_risk', 'N/A')}\n"
-                            f"Key catalyst: {debate_verdict.get('key_catalyst', 'N/A')}"
-                        )
-                    elif debate_verdict.get("verdict") == "SKIP":
-                        print(f"\n  ⚠  Debate says SKIP — still logging scanner pick but adding warning")
-                        rec1["reasoning"] = (
-                            f"[⚠ Debate verdict: SKIP — {debate_verdict.get('reasoning', '')}]\n\n"
-                            f"Original rec: {rec1.get('reasoning', '')}"
-                        )
-            except Exception as e:
-                print(f"  Warning: debate pipeline failed: {e}")
-
-        # Sharpen SL/TP for all picks in recommendations.csv
-        for rec in recs:
-            rec_symbol = rec.get("coin", "").upper()
-            if rec.get("stop_loss") and rec.get("take_profit"):
-                update_scanner_sltp(
-                    rec_symbol,
-                    rec["stop_loss"],
-                    rec["take_profit"],
-                    rec.get("reasoning", ""),
-                )
-
-    # Build Telegram crypto section — unified TOP 3 format.
-    # DISABLED: scanner.py now sends a combined Long/Short/Spot/Whale report.
-    # display_recs = recs_for_display or []
-    # ... (skipping all old msg building)
-    pass
-
-
-    # Polymarket Advisor
-    poly_picks: list[dict] = []
+    # Polymarket & Stocks (minimal terminal output, as requested)
     if run_polymarket:
         try:
             from src.connectors.polymarket import fetch_top_markets
-            from src.agents.polymarket_analyst import (
-                analyze_polymarket, print_polymarket_picks, log_polymarket_picks,
-                update_polymarket_positions, print_polymarket_track_record,
-            )
-            print_header("POLYMARKET ADVISOR")
+            from src.agents.polymarket_analyst import analyze_polymarket, update_polymarket_positions
             update_polymarket_positions()
-            poly_markets = fetch_top_markets(limit=20)
-            if poly_markets:
-                print(f"  Fetched {len(poly_markets)} markets — sending top 10 to Groq…")
-                poly_picks = analyze_polymarket(poly_markets[:10])
-                if poly_picks:
-                    print_polymarket_picks(poly_picks)
-                    log_polymarket_picks(poly_picks)
-            else:
-                print("  No Polymarket data available")
-        except Exception as e:
-            print(f"  Warning: Polymarket advisor failed: {e}")
+            poly_markets = fetch_top_markets(limit=10)
+            if poly_markets: analyze_polymarket(poly_markets)
+        except Exception: pass
 
-    # Stock scanner
-    stock_picks: list[dict] = []
-    stock_rec: dict | None = None   # top BUY for Telegram (backward compat)
     if run_stocks:
         try:
-            from src.agents.stock_scanner import (
-                run_stock_scanner, analyze_stocks_with_groq,
-                log_stock_results, update_stock_positions, print_stock_track_record,
-            )
-            print_header("STOCK SCANNER")
-            update_stock_positions()
-            stock_top10 = run_stock_scanner()
-            if stock_top10:
-                log_stock_results(stock_top10)
-                stock_picks = analyze_stocks_with_groq(stock_top10) or []
-                # Top BUY for Telegram
-                stock_rec = next((p for p in stock_picks if p.get("verdict") == "BUY"), None)
-        except Exception as e:
-            print(f"  Warning: stock scanner failed: {e}")
+            from src.agents.stock_scanner import run_stock_scanner, update_stock_positions
+            update_stock_positions(); run_stock_scanner()
+        except Exception: pass
 
-    # Daily activity summary (pure CSV, no API needed)
     print_daily_activity()
-
-    # v2.0 clean scan summary: open positions, top 10, open whale rides, top 10 whale suspects
     print_scan_summary(top10=top10, whale_rides=whale_rides, fear_greed=fg)
-
-    # Combined track record
-    print_header("TRACK RECORD")
     print_track_record()
-    try:
-        print_stock_track_record()
-    except Exception:
-        pass
-    try:
-        print_polymarket_track_record()
-    except Exception:
-        pass
 
-    # Telegram — combined crypto + stock + Polymarket alert
-    # Always send even if only stocks or Polymarket picks are available
-    _has_stocks   = bool([p for p in stock_picks if p.get("verdict") == "BUY"])
-    _has_poly     = bool(poly_picks)
-    if msg or _has_stocks or _has_poly:
-        if not msg:
-            fg_value_msg = fg.get("value", "?")
-            fg_label_msg = fg.get("label", "?")
-            msg = (
-                f"<b>CryptoAdvisor — SCAN REPORT</b>\n\n"
-                f"Fear &amp; Greed: {fg_value_msg}/100 ({fg_label_msg})\n"
-                f"<i>No crypto picks this cycle.</i>"
-            )
-
-        def _f2(v):
-            return f"${v:,.2f}" if isinstance(v, (int, float)) else str(v)
-
-        top_stock_buys = [p for p in stock_picks if p.get("verdict") == "BUY"][:3]
-        if top_stock_buys:
-            msg += "\n\n<b>TOP STOCK BUYS:</b>"
-            for i, p in enumerate(top_stock_buys, 1):
-                s_sym = p.get("stock", "?")
-                s_ep  = p.get("entry_price", 0)
-                s_sl  = p.get("stop_loss", 0)
-                s_tp  = p.get("take_profit", 0)
-                msg  += f"\n{i}. {s_sym} @ {_f2(s_ep)}  SL {_f2(s_sl)}  TP {_f2(s_tp)}"
-
-        for wr in whale_rides:
-            sym      = wr["symbol"]
-            ep       = wr["entry"]
-            sl       = wr["stop_loss"]
-            tp       = wr["take_profit"]
-            hold     = wr["max_hold_hours"]
-            cyc      = wr["cycle_number"]
-            scam_tag = "⚠️ SERIAL SCAM — same wallets as " + "/".join(wr.get("allies", [])) if wr["is_serial_scam"] else "⚠️ HIGH RISK"
-            cycles   = " → ".join(wr["known_cycles"]) if wr["known_cycles"] else "first recorded"
-            msg += (
-                f"\n\n🐋 <b>WHALE RIDE:</b> {sym} @ {_f2(ep)}"
-                f"  SL {_f2(sl)} TP {_f2(tp)} | max {hold}h"
-                f"\nCycle #{cyc}: {cycles}"
-                f"\n{scam_tag}"
-                f"\nMax 5% of portfolio — EXTREME RISK"
-            )
-
-        if poly_picks:
-            # Top 3 by edge (edge > 5pp), else by confidence
-            # Hard filter: never show 0% or 100% odds markets (already certain, no value in betting)
-            # Check both _auto_trivial flag AND raw probability — belt and suspenders
-            def _prob_actionable(p) -> bool:
-                if p.get("_auto_trivial"):
-                    return False
-                prob = p.get("probability")
-                if prob is None:
-                    return True
-                pct = round(prob * 100, 1)
-                return 0 < pct < 100  # exclude exactly 0% and 100%
-
-            display_poly = [p for p in poly_picks if _prob_actionable(p)]
-            edge_picks = sorted(
-                [p for p in display_poly if p.get("is_opportunity") and float(p.get("edge_pct") or 0) > 5],
-                key=lambda p: -float(p.get("edge_pct") or 0)
-            )
-            top3_poly = edge_picks[:3] or sorted(
-                display_poly, key=lambda p: -(p.get("llm_confidence") or 0)
-            )[:3]
-            if top3_poly:
-                msg += "\n\n<b>TOP POLYMARKET BETS:</b>"
-                for i, pp in enumerate(top3_poly, 1):
-                    v        = pp.get("llm_verdict") or "?"
-                    q        = pp.get("question", "?")[:55]
-                    prob_p   = pp.get("probability")
-                    odds_s   = f"{prob_p*100:.0f}%" if prob_p is not None else "?"
-                    edge_v   = pp.get("edge_pct")
-                    edge_s   = f" edge +{float(edge_v):.0f}pp" if edge_v else ""
-                    msg     += f"\n{i}. {v} on \"{q}\" @ {odds_s}{edge_s} — bet $100"
-
-        send_telegram(msg)
 
     # CoinGecko call count for this cycle
     try:
