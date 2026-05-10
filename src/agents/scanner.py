@@ -1393,6 +1393,7 @@ def run_smart_scanner(
     exchange:    None (no filter) | "revolut" | "binance" | "all"
     fear_greed:  dict with "value" (0-100) and "label" — used for macro filter
     """
+    quality_count = 0
     pump_coins = []  # Initialize to ensure it's always defined
     label    = exchange.upper() if exchange else "ALL EXCHANGES"
     fg_value = (fear_greed or {}).get("value", 50)   # 0-100; used for macro gates below
@@ -2289,6 +2290,12 @@ def run_smart_scanner(
             log_whale_ride(wr, fear_greed.get("value", 50))
             _open_syms.add(_sym)
             valuable_wr.append(wr)
+
+    # Final count of high-value picks for return
+    try:
+        quality_count = len(top_longs) + len(top_shorts) + len(top_spots)
+    except NameError:
+        quality_count = 0
 
     return top10, pump_coins, all_whale_rides, quality_count, _catalysts
 
