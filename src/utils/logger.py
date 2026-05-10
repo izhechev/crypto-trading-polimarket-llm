@@ -252,7 +252,7 @@ def update_open_positions() -> None:
             row["exit_price"] = round(usd, 8)
             row["close_date"] = _now_str
             new_wins.append(row)
-            side = "SHORT" if is_short else "LONG"
+            side = row.get("recommended_order", "LONG")
             print(f"  ✅ WIN ({side}): {row['coin']} {pnl_pct:+.1f}% within {hours_open:.1f}h")
             try:
                 from src.utils.telegram import send_telegram as _tg
@@ -392,8 +392,7 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
             curr = float(r.get("current_price") or entry)
             is_short = r.get("recommended_order") == "SHORT"
             pnl = ((entry - curr) if is_short else (curr - entry)) / entry * 100 if entry > 0 else 0
-            icon = "+" if pnl >= 0 else "-"
-            side = "SHORT" if is_short else "LONG"
+            side = r.get("recommended_order", "LONG")
             print(f"    [{icon}] {r['coin']:8s}  {pnl:+.1f}% ({side})  entry {entry:.4f}  now {curr:.4f}")
         except Exception: pass
 
