@@ -1520,11 +1520,18 @@ def run_smart_scanner(
         # print(f"  {len(raw_pump_coins)} pump alert(s) (>100% 7d) — classifying...")
         pass
 
-    # ... (other code)
-
-    if portfolio_symbols:
-        # print(f"  Portfolio exclusion from portfolio.json: {', '.join(sorted(portfolio_symbols))}")
+    # 4d. Manual exclusions from portfolio.json
+    portfolio_symbols = set()
+    try:
+        from config import PORTFOLIO_PATH
+        if PORTFOLIO_PATH.exists():
+            with open(PORTFOLIO_PATH) as f:
+                pf = json.load(f)
+            for h in pf.get("holdings", []):
+                portfolio_symbols.add(h["asset"].upper())
+    except Exception:
         pass
+
     if portfolio_symbols:
         pre_pf = len(exchange_coins)
         exchange_coins = [
@@ -2043,13 +2050,14 @@ def run_smart_scanner(
         normal_results = [r for r in normal_results if r["symbol"].upper() not in approaching_tp]
 
     # ── Most Valuable Only ──
-    # Show only HIGH score picks (Score >= 8) and separate Long/Short
+    # Show only HIGH score picks (Score ≥ 8) and separate Long/Short/Spot
     top_longs  = [r for r in normal_results if r["score"] >= 8 and r["recommended_order"] == "LONG"][:5]
     top_shorts = [r for r in normal_results if r["score"] >= 8 and r["recommended_order"] == "SHORT"][:5]
+    top_spots  = [r for r in normal_results if r["score"] >= 8 and r["recommended_order"] == "SPOT"][:5]
     top10 = normal_results[:10]
 
     # Fetch 1-sentence news catalysts for actual picks
-    picks_to_fetch = top_longs + top_shorts
+    picks_to_fetch = top_longs + top_shorts + top_spots
     if not picks_to_fetch: picks_to_fetch = top10
     _catalysts: dict[str, str] = {}
     try:
@@ -2076,8 +2084,16 @@ def run_smart_scanner(
     else:
         print("\n  📉  TOP SHORT PICKS: none found")
 
+    if top_spots:
+        print(f"\n  💰  TOP SPOT PICKS")
+        print("-" * 30)
+        for rank, r in enumerate(top_spots, 1):
+            _print_pick(rank, r, _catalysts)
+    else:
+        print("\n  💰  TOP SPOT PICKS: none found")
+
     # ── HOLD fill: show open positions when fewer than 3 quality new picks ──
-    quality_picks = top_longs + top_shorts
+    quality_picks = top_longs + top_shorts + top_spots
     if len(quality_picks) < 3 and open_positions:
         needed      = 3 - len(quality_picks)
         hold_fills  = [p for p in open_positions if not p["is_stale"]][:needed]
@@ -2227,10 +2243,11 @@ def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
 def _send_telegram_valuable(
     longs: list[dict],
     shorts: list[dict],
+    spots: list[dict],
     whale_rides: list[dict],
     fear_greed: dict,
 ) -> None:
-    """Send valuable LONG/SHORT picks to Telegram."""
+    """Send valuable LONG/SHORT/SPOT picks to Telegram."""
     from src.utils.telegram import send_telegram
 
     def _f(v):
@@ -2253,6 +2270,11 @@ def _send_telegram_valuable(
         for i, r in enumerate(shorts, 1):
             msg += f"  {i}. <b>{r['symbol']}</b> @ {_f(r['price'])} (Score {r['score']})\n"
 
+    if spots:
+        msg += "\n💰 <b>TOP SPOTS:</b>\n"
+        for i, r in enumerate(spots, 1):
+            msg += f"  {i}. <b>{r['symbol']}</b> @ {_f(r['price'])} (Score {r['score']})\n"
+
     # Add best Whale Rides
     val_wr = [wr for wr in whale_rides if wr.get("cycle_number", 0) >= 2][:3]
     if val_wr:
@@ -2260,7 +2282,7 @@ def _send_telegram_valuable(
         for wr in val_wr:
             msg += f"  🐋 <b>{wr['symbol']}</b> (Cycle #{wr['cycle_number']}) — {wr['crash_reason'][:50]}...\n"
 
-    if not longs and not shorts and not val_wr:
+    if not longs and not shorts and not spots and not val_wr:
         msg += "\n<i>No high-confidence opportunities found this cycle.</i>"
 
     send_telegram(msg)
