@@ -2056,12 +2056,41 @@ def run_smart_scanner(
             pass
         normal_results = [r for r in normal_results if r["symbol"].upper() not in approaching_tp]
 
-    # ── God-Tier Only ──
+    # 13. God-Tier Liquidity Check (DexScreener)
+    # Perform for high-potential candidates to ensure we can actually exit
+    print(f"  Performing on-chain liquidity checks for top {len(quality_picks)} picks...")
+    from src.connectors.dexscreener import fetch_dex_liquidity
+    from src.connectors.coingecko import fetch_platform_info
+    
+    for r in quality_picks:
+        try:
+            cid = r.get("id")
+            liq = 0.0
+            if cid:
+                info = fetch_platform_info(cid)
+                liq = fetch_dex_liquidity(r["symbol"], info.get("address"))
+            else:
+                liq = fetch_dex_liquidity(r["symbol"])
+            
+            r["liquidity_usd"] = liq
+            if liq > 0:
+                if liq < 100_000:
+                    r["score"] -= 2
+                    r["reasoning"].append(f"Low liquidity (${liq/1e3:.0f}k)")
+                elif liq > 1_000_000:
+                    r["score"] += 1
+                    r["reasoning"].append(f"Deep liquidity (${liq/1e6:.1f}M)")
+        except Exception: pass
+
+    # Re-sort and filter after on-chain checks
+    quality_picks.sort(key=lambda x: (x["score"], x.get("change_24h", 0)), reverse=True)
+    
+    # ── Most Valuable Only ──
     # Show Top Long/Short/Spot picks that meet 100% confidence technical score thresholds
-    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG" and r.get("score", 0) >= 10]
-    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT" and r.get("score", 0) >= 10]
-    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT" and r.get("score", 0) >= 8]
-    top10 = normal_results[:10]
+    top_longs  = [r for r in quality_picks if r["recommended_order"] == "LONG" and r.get("score", 0) >= 10]
+    top_shorts = [r for r in quality_picks if r["recommended_order"] == "SHORT" and r.get("score", 0) >= 10]
+    top_spots  = [r for r in quality_picks if r["recommended_order"] == "SPOT" and r.get("score", 0) >= 8]
+    top10 = quality_picks[:10]
 
     # Fetch 1-sentence news catalysts for actual picks
     picks_to_fetch = top_longs + top_shorts + top_spots

@@ -395,6 +395,43 @@ def assess_coin_risks(
         results[sym] = ra
         cache[sym]   = ra
 
+    # Step 6 — God-Tier Security: GoPlus Audit
+    # Perform security audit for suspicious or highly volatile small caps
+    for sym, ra in results.items():
+        if ra.category == "NORMAL" and any(r.get("symbol", "").upper() == sym for r in to_assess):
+            coin = next(r for r in to_assess if r.get("symbol", "").upper() == sym)
+            mcap = coin.get("market_cap", 1e10)
+            if mcap < 100_000_000:
+                try:
+                    from src.connectors.coingecko import fetch_platform_info
+                    from src.connectors.goplus import fetch_token_security, is_honeypot, get_total_tax
+                    
+                    cid = coin.get("id")
+                    if cid:
+                        info = fetch_platform_info(cid)
+                        if info and info.get("address"):
+                            sec = fetch_token_security(info["chain"], info["address"])
+                            if sec:
+                                if is_honeypot(sec):
+                                    ra.category = "ACTIVE_SCAM"
+                                    ra.flags.append("HONEYPOT_DETECTED")
+                                    ra.reasoning += " | GoPlus: HONEYPOT detected."
+                                
+                                tax = get_total_tax(sec)
+                                if tax > 15.0:
+                                    ra.category = "ACTIVE_SCAM"
+                                    ra.flags.append(f"HIGH_TAX_{tax:.0f}%")
+                                    ra.reasoning += f" | GoPlus: High Tax ({tax:.0f}%)."
+                                
+                                if sec.get("is_proxy") == "1":
+                                    ra.flags.append("PROXY_CONTRACT")
+                                    ra.reasoning += " | GoPlus: Proxy."
+                                
+                                if sec.get("is_mintable") == "1":
+                                    ra.flags.append("MINTABLE")
+                                    ra.reasoning += " | GoPlus: Mintable."
+                except Exception: pass
+
     _save_cache(cache)
     return results
 

@@ -259,6 +259,36 @@ def search_cg_id(symbol: str) -> str:
     return cg_id
 
 
+def fetch_platform_info(coin_id: str) -> dict:
+    """
+    Fetch contract address and platform (blockchain) for a coin.
+    Used for on-chain security audits (GoPlus/DexScreener).
+    """
+    cache_key = f"platform_{coin_id}"
+    cached = _get_cached(cache_key)
+    if cached: return cached
+
+    try:
+        url = f"{_base_url()}/coins/{coin_id}"
+        params = {"localization": "false", "tickers": "false", "market_data": "false", "community_data": "false", "developer_data": "false"}
+        with httpx.Client(timeout=10) as client:
+            resp = _cg_get(client, url, params=params, headers=_headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                platforms = data.get("platforms", {})
+                # Pick the primary platform (first one usually)
+                if not platforms: return {}
+                
+                chain = list(platforms.keys())[0]
+                address = platforms[chain]
+                
+                result = {"chain": chain, "address": address, "all_platforms": platforms}
+                _set_cache(cache_key, result)
+                return result
+    except Exception: pass
+    return {}
+
+
 def fetch_ohlcv(coin_id: str, days: int = 30) -> list[dict]:
     """Fetch OHLCV data for technical analysis."""
     global _CG_OHLCV_QUOTA_EXHAUSTED
