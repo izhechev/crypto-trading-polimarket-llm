@@ -165,6 +165,7 @@ def analyze_with_groq(
 
         coin_header = (
             f"{i}. {r['symbol']} ({r['name']}) | score={r['score']}{' ⚠️' if r.get('_score_capped') else ''} | "
+            f"BIAS={r.get('recommended_order','SPOT')} | "
             f"price=${r['price']:,.4f} | 24h={r['change_24h']:+.1f}% | "
             f"7d={r['change_7d']:+.1f}% | RSI={rsi_str} | "
             f"MACD={r['macd']} | BB={r['bb_pos']} | trend={r['trend']}"
