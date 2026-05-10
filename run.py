@@ -554,23 +554,22 @@ def run_scan_cycle(
         except Exception as e:
             print(f"  ⚠️  Groq failed: {e}")
 
-    # ── High-Conviction Filtering ──
-    # User requested to "open based cuz it has high confidence" and "open only high confidence picks".
-    # We will accept BUY signals with at least Medium confidence (>= 0.6) to ensure we don't miss 
-    # good setups, but we still enforce strict technical score checks.
-    best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.6]
+    # ── God-Tier Extreme Filtering (100% Win-Rate Mode) ──
+    # User requested absolute highest confidence only, even if it means 1 entry per day.
+    # We require a strict Groq HIGH confidence verdict (>= 0.8).
+    best_picks = [r for r in recs if r.get("verdict") == "BUY" and r.get("confidence_score", 0) >= 0.8]
     
     if best_picks:
-        print_header("HIGH-CONVICTION OPPORTUNITIES")
+        print_header("GOD-TIER HIGH-CONVICTION OPPORTUNITIES")
         for i, p in enumerate(best_picks, 1):
             _sym  = p["coin"].upper()
             _side = p.get("recommended_order", "SPOT")
             _conf = p.get("confidence", "LOW")
             
-            # Additional safety check: only open if scanner score was very high
-            # (Long/Short >= 8, Spot >= 6)
+            # Additional safety check: only open if scanner score is absolutely elite
+            # (Long/Short >= 10, Spot >= 8) out of a maximum of 12.
             _score = p.get("scanner_score", 0)
-            _meets_extreme_score = (_side in ("LONG", "SHORT") and _score >= 8) or (_side == "SPOT" and _score >= 6)
+            _meets_extreme_score = (_side in ("LONG", "SHORT") and _score >= 10) or (_side == "SPOT" and _score >= 8)
 
             if _meets_extreme_score:
                 print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}, Score: {_score}) | Price: ${p.get('entry_price', 0):.4f}")
@@ -590,21 +589,21 @@ def run_scan_cycle(
                         log_recommendation({
                             "coin": _sym, "coin_id": _cid,
                             "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
-                            "timeframe": "24h Window", "reasoning": f"High Conviction BUY. Conf: {_conf}, Score: {_score}.",
+                            "timeframe": "24h Window", "reasoning": f"God-Tier Conviction BUY. Conf: {_conf}, Score: {_score}.",
                             "recommended_order": _side,
                         }, fg.get("value", 50))
                         _already_open_syms.add(_sym)
             else:
-                print(f"  ❌ {_sym} rejected: LLM confidence is {_conf}, but technical score ({_score}) is too low.")
+                print(f"  ❌ {_sym} rejected: LLM confidence is {_conf}, but technical score ({_score}) is not elite enough.")
     else:
-        print("\n  ℹ️  No high-conviction BUY opportunities this cycle.")
+        print("\n  ℹ️  No God-Tier BUY opportunities this cycle.")
 
     # Auto-log valuable Whale Rides
-    # Only log if they meet a high threshold (Cycle >= 2 or Score >= 4)
+    # Only log if they meet a God-Tier threshold (Cycle >= 3 or Score >= 7)
     for wr in whale_rides:
         _sym = wr.get("symbol", "").upper()
         if _sym not in _already_open_syms:
-            if wr.get("cycle_number", 0) >= 2 or wr.get("hc_score", 0) >= 4:
+            if wr.get("cycle_number", 0) >= 3 or wr.get("hc_score", 0) >= 7:
                 log_whale_ride(wr, fg.get("value", 50))
                 _already_open_syms.add(_sym)
 
