@@ -135,11 +135,16 @@ def fetch_binance_futures_data(symbol: str) -> dict | None:
     if cached is not None:
         return cached
 
-    pair = f"{symbol.upper()}/USDT"
+    sym = symbol.upper()
     try:
-        import ccxt
-        # Use binanceusdm for USD-margined futures
-        exchange = ccxt.binanceusdm({"enableRateLimit": True})
+        exchange = _get_unified_exchange()
+        
+        # CCXT futures pairs are typically SYMBOL/USDT:USDT
+        pair = f"{sym}/USDT:USDT"
+        if pair not in exchange.markets:
+            # Try alternate formats
+            if f"{sym}/USDC:USDC" in exchange.markets: pair = f"{sym}/USDC:USDC"
+            else: return None
         
         # 1. Fetch Funding Rate
         funding = exchange.fetch_funding_rate(pair)
@@ -150,15 +155,14 @@ def fetch_binance_futures_data(symbol: str) -> dict | None:
         oi_usd = oi_data.get("baseVolume", 0) * oi_data.get("last", 0)
         
         result = {
-            "symbol":        symbol.upper(),
+            "symbol":        sym,
             "funding_rate":  round(funding_rate, 5),
             "oi_usd":        round(oi_usd, 0),
             "timestamp":     time.time(),
         }
         _set_cache(cache_key, result)
         return result
-    except Exception as e:
-        # print(f"  [Binance Futures] error for {symbol}: {e}")
+    except Exception:
         return None
 
 
@@ -222,12 +226,37 @@ def fetch_binance_ohlcv(
         return None
 
 
+_EXCHANGE_INST = None
+
+def _get_unified_exchange():
+    global _EXCHANGE_INST
+    if _EXCHANGE_INST is None:
+        import ccxt
+        _EXCHANGE_INST = ccxt.binance({"enableRateLimit": True})
+        _EXCHANGE_INST.load_markets()
+    return _EXCHANGE_INST
+
 def fetch_binance_orderbook(symbol: str, limit: int = 20) -> dict | None:
     """Fetch order book for a symbol. Returns {bids, asks, spread}."""
-    pair = f"{symbol.upper()}/USDT"
+    sym = symbol.upper()
     try:
-        exchange = _get_exchange()
-        book = exchange.fetch_order_book(pair, limit=limit)
+        exchange = _get_unified_exchange()
+        
+        # 1. Try standard Spot USDT pair
+        # 2. Try standard Futures USDT pair (often where newer coins are)
+        # 3. Try standard Spot USDC pair
+        pairs_to_try = [f"{sym}/USDT", f"{sym}/USDT:USDT", f"{sym}/USDC"]
+        
+        book = None
+        for pair in pairs_to_try:
+            if pair in exchange.markets:
+                try:
+                    book = exchange.fetch_order_book(pair, limit=limit)
+                    break
+                except Exception: continue
+        
+        if not book: return None
+
         best_bid = book["bids"][0][0] if book.get("bids") else 0
         best_ask = book["asks"][0][0] if book.get("asks") else 0
         spread = ((best_ask - best_bid) / best_bid * 100) if best_bid else 0
