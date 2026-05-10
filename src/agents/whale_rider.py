@@ -494,6 +494,9 @@ def send_whale_ride_alerts(
     except Exception: pass
 
     is_neutral = fg_value >= 40
+    _MAX_TOTAL_POSITIONS = 50 if is_neutral else 30
+    _MAX_WHALE_AUTO      = 20 if is_neutral else 10
+    _auto_opened         = 0
     fg_line  = f"⚠️ F&amp;G = {fg_value} ({'Neutral' if is_neutral else 'Fear'}) — {'Aggressive' if is_neutral else 'Conservative'} mode"
 
     if hc_msg:
