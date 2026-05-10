@@ -1393,6 +1393,7 @@ def run_smart_scanner(
     exchange:    None (no filter) | "revolut" | "binance" | "all"
     fear_greed:  dict with "value" (0-100) and "label" — used for macro filter
     """
+    pump_coins = []  # Initialize to ensure it's always defined
     label    = exchange.upper() if exchange else "ALL EXCHANGES"
     fg_value = (fear_greed or {}).get("value", 50)   # 0-100; used for macro gates below
     # Fetch 3000 coins — CP sorts strictly by market cap, pump coins can sit at rank 1001-3000
@@ -1508,6 +1509,9 @@ def run_smart_scanner(
         if (c.get("price_change_percentage_7d_in_currency") or 0) > 100
     ]
     exchange_coins = [c for c in exchange_coins if c not in raw_pump_coins]
+
+    # pump_coins passed downstream: used for Groq analysis context
+    pump_coins = raw_pump_coins
 
     # Check existing watchlist for crashes that now qualify for whale ride entry
     auto_watchlist_rides = _check_watchlist_crashes(exchange_coins + raw_pump_coins)
