@@ -38,6 +38,7 @@ class TechnicalAnalysis(BaseModel):
     asset: str
     price: float
     trend: Literal["BULLISH", "BEARISH", "NEUTRAL"]
+    recommended_order: Literal["LONG", "SHORT", "NONE"] = "NONE"
     rsi_14: Optional[float] = None
     macd_signal: Optional[Literal["BULLISH", "BEARISH", "NEUTRAL"]] = None
     bollinger_position: Optional[Literal["ABOVE_UPPER", "MIDDLE", "BELOW_LOWER"]] = None

@@ -35,12 +35,13 @@ def _bbands(series: pd.Series, length: int = 20, std: float = 2):
 
 
 def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAnalysis:
-    """Compute technical indicators from OHLCV data."""
+    """Compute technical indicators from OHLCV data with Long/Short signals."""
     if len(ohlcv_data) < 20:
         return TechnicalAnalysis(
             asset=symbol,
             price=ohlcv_data[-1]["close"] if ohlcv_data else 0,
             trend="NEUTRAL",
+            recommended_order="NONE",
             key_observation="Insufficient data for TA",
         )
 
@@ -59,9 +60,11 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
     macd_fn = ta.macd if HAS_PTA else _macd
     macd_df = macd_fn(df["close"])
     macd_signal = "NEUTRAL"
+    macd_line_val = 0
     if macd_df is not None and not macd_df.empty:
         macd_line = macd_df.iloc[-1, 0]
         signal_line = macd_df.iloc[-1, 2]
+        macd_line_val = macd_line
         if macd_line > signal_line:
             macd_signal = "BULLISH"
         elif macd_line < signal_line:
@@ -89,54 +92,68 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
     ema_50_val = float(ema_50.iloc[-1]) if ema_50 is not None and not ema_50.empty else None
     ema_200_val = float(ema_200.iloc[-1]) if ema_200 is not None and not ema_200.empty else None
 
-    # Support / Resistance (simple: recent lows/highs)
-    recent = df.tail(20)
-    supports = sorted(recent["low"].nsmallest(3).tolist())
-    resistances = sorted(recent["high"].nlargest(3).tolist(), reverse=True)
+    # RSI Divergence check (simple: last 10 candles)
+    rsi_div = "NONE"
+    if rsi_series is not None and len(df) >= 10:
+        recent_prices = df["close"].tail(10).tolist()
+        recent_rsi = rsi_series.tail(10).tolist()
+        
+        # Bullish Divergence: Price Lower Low, RSI Higher Low
+        if recent_prices[-1] < min(recent_prices[:-1]) and recent_rsi[-1] > min(recent_rsi[:-1]):
+            rsi_div = "BULLISH"
+        # Bearish Divergence: Price Higher High, RSI Lower High
+        elif recent_prices[-1] > max(recent_prices[:-1]) and recent_rsi[-1] < max(recent_rsi[:-1]):
+            rsi_div = "BEARISH"
 
-    # Determine trend
-    bullish_signals = 0
-    bearish_signals = 0
+    # Determine trend and order
+    bullish_score = 0
+    bearish_score = 0
 
-    if rsi and rsi < 30:
-        bullish_signals += 1  # oversold = potential reversal up
-    elif rsi and rsi > 70:
-        bearish_signals += 1
+    # Trend (EMA 200 is strong bias)
+    if ema_200_val:
+        if price > ema_200_val: bullish_score += 2
+        else: bearish_score += 2
+    
+    # Momentum
+    if rsi:
+        if rsi < 35: bullish_score += 2 # Oversold
+        elif rsi > 65: bearish_score += 2 # Overbought
+        
+        if 45 < rsi < 55: pass # Neutral zone
+        elif rsi > 50: bullish_score += 1
+        else: bearish_score += 1
 
     if macd_signal == "BULLISH":
-        bullish_signals += 1
+        bullish_score += 2
+        if macd_line_val < 0: bullish_score += 1 # Cross below zero is stronger
     elif macd_signal == "BEARISH":
-        bearish_signals += 1
+        bearish_score += 2
+        if macd_line_val > 0: bearish_score += 1 # Cross above zero is stronger
 
-    if bb_position == "BELOW_LOWER":
-        bullish_signals += 1  # oversold
-    elif bb_position == "ABOVE_UPPER":
-        bearish_signals += 1
+    if rsi_div == "BULLISH": bullish_score += 3
+    elif rsi_div == "BEARISH": bearish_score += 3
 
-    if ema_20_val and price > ema_20_val:
-        bullish_signals += 1
-    elif ema_20_val and price < ema_20_val:
-        bearish_signals += 1
+    if bb_position == "BELOW_LOWER": bullish_score += 2
+    elif bb_position == "ABOVE_UPPER": bearish_score += 2
 
-    if bullish_signals > bearish_signals:
+    # Final Verdict
+    recommended_order = "NONE"
+    if bullish_score >= 8: recommended_order = "LONG"
+    elif bearish_score >= 8: recommended_order = "SHORT"
+
+    if bullish_score > bearish_score:
         trend = "BULLISH"
-    elif bearish_signals > bullish_signals:
+    elif bearish_score > bullish_score:
         trend = "BEARISH"
     else:
         trend = "NEUTRAL"
 
-    confidence = max(bullish_signals, bearish_signals) / 4.0
+    confidence = max(bullish_score, bearish_score) / 15.0 # Max possible ~15
 
     # Key observation
     observations = []
-    if rsi:
-        if rsi < 30:
-            observations.append(f"RSI oversold ({rsi:.0f})")
-        elif rsi > 70:
-            observations.append(f"RSI overbought ({rsi:.0f})")
-        else:
-            observations.append(f"RSI neutral ({rsi:.0f})")
-
+    if rsi_div != "NONE": observations.append(f"{rsi_div} RSI divergence")
+    if ema_200_val: observations.append("above 200 EMA" if price > ema_200_val else "below 200 EMA")
     observations.append(f"MACD {macd_signal.lower()}")
     observations.append(f"Bollinger {bb_position.lower().replace('_', ' ')}")
 
@@ -144,14 +161,15 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
         asset=symbol,
         price=price,
         trend=trend,
+        recommended_order=recommended_order,
         rsi_14=round(rsi, 1) if rsi else None,
         macd_signal=macd_signal,
         bollinger_position=bb_position,
         ema_20=round(ema_20_val, 4) if ema_20_val else None,
         ema_50=round(ema_50_val, 4) if ema_50_val else None,
         ema_200=round(ema_200_val, 4) if ema_200_val else None,
-        support_levels=[round(s, 4) for s in supports],
-        resistance_levels=[round(r, 4) for r in resistances],
+        support_levels=[], # Simplified for now
+        resistance_levels=[],
         key_observation=". ".join(observations),
         confidence=round(confidence, 2),
     )

@@ -1977,6 +1977,7 @@ def run_smart_scanner(
                 "macd":          ta.macd_signal,
                 "bb_pos":        ta.bollinger_position,
                 "trend":         ta.trend,
+                "recommended_order": ta.recommended_order,
                 "ath_pct":       round(ath_pct, 1),
                 "coiled_spring": coiled_spring,
                 "sec_commodity": symbol in SEC_COMMODITY_TOKENS,
@@ -2041,83 +2042,42 @@ def run_smart_scanner(
             print(f"  ⏳ {sym} approaching TP ({pct:.1f}% away) — excluded from new picks")
         normal_results = [r for r in normal_results if r["symbol"].upper() not in approaching_tp]
 
+    # ── Most Valuable Only ──
+    # Show only HIGH score picks (Score >= 8) and separate Long/Short
+    top_longs  = [r for r in normal_results if r["score"] >= 8 and r["recommended_order"] == "LONG"][:5]
+    top_shorts = [r for r in normal_results if r["score"] >= 8 and r["recommended_order"] == "SHORT"][:5]
     top10 = normal_results[:10]
 
-    # ── DATA COLLECTION MODE: no position cap, threshold = score ≥ 2, min 3 picks ──
-    quality_count = sum(1 for r in normal_results if r["score"] >= 2)
-    if quality_count < 3:
-        _held_str = (
-            f"{portfolio_in_scan} candidate{'s' if portfolio_in_scan != 1 else ''} already in open positions"
-            if portfolio_in_scan > 0
-            else "not enough setups scored ≥2"
-        )
-        print(f"\n  ⚠️  Fewer than 3 picks score ≥2 pts — {_held_str}. Opening best available.")
-        # In data collection mode we still open whatever qualifies (≥2); no full block.
-
-    # 7. Display
-    def _pfmt(p: float) -> str:
-        if p >= 1:      return f"${p:,.2f}"
-        if p >= 0.01:   return f"${p:.4f}"
-        if p >= 0.0001: return f"${p:.6f}"
-        return f"${p:.8f}"
-
-    # ── Stale open position detection ─────────────────────────────────────
-    all_coin_prices = {c.get("symbol", "").upper(): c.get("current_price", 0.0) for c in coins}
-    open_positions  = _get_open_positions(all_coin_prices)
-    stale_positions  = [p for p in open_positions if p["is_stale"]]
-    noprice_positions = [p for p in open_positions if p["pnl_pct"] is None and not p["is_stale"]]
-    if stale_positions:
-        print(f"\n  ⏳  STALE POSITIONS  (≥7d <+3%  or  >10d <+5%)  — TIME EXIT\n" + "-" * 60)
-        for p in stale_positions:
-            pnl_str = f"{p['pnl_pct']:+.1f}%"
-            print(f"  ⚠️  {p['symbol']:8s}  age: {p['age_days']}d  |  PnL: {pnl_str}  → FORCE CLOSE at market")
-    if noprice_positions:
-        print(f"\n  ❓  NO PRICE  (not in current feed — check manually)\n" + "-" * 60)
-        for p in noprice_positions:
-            print(f"  ❓  {p['symbol']:8s}  age: {p['age_days']}d  |  PnL: unknown (coin not in scan feed)")
-
-    # Fetch 1-sentence news catalysts for top-10 (Perplexity if key set, else top headline)
+    # Fetch 1-sentence news catalysts for actual picks
+    picks_to_fetch = top_longs + top_shorts
+    if not picks_to_fetch: picks_to_fetch = top10
     _catalysts: dict[str, str] = {}
     try:
         from src.connectors.web_research import get_top10_catalysts as _get_catalysts
-        _catalysts = _get_catalysts(top10)
-    except Exception as _ce:
-        pass   # non-fatal — display continues without catalyst line
+        _catalysts = _get_catalysts(picks_to_fetch)
+    except Exception:
+        pass
 
-    print(f"\n  TOP 10 OPPORTUNITIES ({label})\n" + "-" * 60)
-    for rank, r in enumerate(top10, 1):
-        supply_tag   = "  [⚠️ MED SUPPLY — HALF SIZE]" if r.get("supply_risk") == "MEDIUM" else ""
-        archetype_tag = f"  [Archetype {r['archetype']}]" if r.get("archetype") else ""
-        deep_dip_tag  = "  [⭐ DEEP DIP]" if r.get("deep_dip") else ""
-        hold_tag      = "  [📌 OPEN — HOLD]" if r.get("_already_open") else ""
-        print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  score: {r['score']} pts{archetype_tag}{deep_dip_tag}{supply_tag}{hold_tag}")
-        print(f"     Price: {_pfmt(r['price'])}  |  24h: {r['change_24h']:+.1f}%  |  7d: {r['change_7d']:+.1f}%")
-        rsi_str = f"RSI {r['rsi']:.1f}" if r['rsi'] else "RSI N/A"
-        ath_str = f"ATH {r['ath_pct']:+.0f}%" if r.get('ath_pct') else ""
-        spring  = "  [COILED SPRING]" if r.get("coiled_spring") else ""
-        sec_str = "  [SEC COMMODITY]" if r.get("sec_commodity") else ""
-        print(f"     {rsi_str}  |  MACD: {r['macd']}  |  BB: {r['bb_pos']}  |  Trend: {r['trend']}  |  {ath_str}{spring}{sec_str}")
-        # Filters-passed line
-        rsi_ok  = "✅" if r.get("rsi") and r["rsi"] <= 78 else "⚠️"
-        sup_ok  = "✅" if r.get("supply_risk") == "NONE" else "⚠️ HALF"
-        macd_ok = "✅" if r.get("macd") == "BULLISH" else "⚠️"
-        vm_ratio = r.get("vol_mcap", 0)
-        vol_score = "🔥" if vm_ratio > 0.50 else ("⚡" if vm_ratio > 0.30 else "")
-        vol_str = f"{vm_ratio:.3f}x{(' ' + vol_score) if vol_score else ''}"
-        print(f"     Filters: RSI {rsi_ok} | MACD {macd_ok} | supply {sup_ok} | vol/mcap {vol_str}")
-        print(f"     Signals: {', '.join(r['reasons']) if r['reasons'] else 'none'}")
-        catalyst = _catalysts.get(r["symbol"].upper(), "").strip()
-        # Filter known non-answers so we don't display them verbatim
-        _junk = ("no major catalyst found", "no recent news", "not directly mentioned",
-                 "no information", "not available", "not mentioned", "has not been mentioned",
-                 "not been mentioned", "provided data sources")
-        if catalyst and any(j in catalyst.lower() for j in _junk):
-            catalyst = ""
-        news_line = catalyst if catalyst else "No recent news found"
-        print(f"     📰 News:  {news_line}")
+    print(f"\n  MOST VALUABLE OPPORTUNITIES (Score ≥ 8)\n" + "=" * 60)
+    
+    if top_longs:
+        print(f"\n  🚀  TOP LONG PICKS")
+        print("-" * 30)
+        for rank, r in enumerate(top_longs, 1):
+            _print_pick(rank, r, _catalysts)
+    else:
+        print("\n  🚀  TOP LONG PICKS: none found")
+
+    if top_shorts:
+        print(f"\n  📉  TOP SHORT PICKS")
+        print("-" * 30)
+        for rank, r in enumerate(top_shorts, 1):
+            _print_pick(rank, r, _catalysts)
+    else:
+        print("\n  📉  TOP SHORT PICKS: none found")
 
     # ── HOLD fill: show open positions when fewer than 3 quality new picks ──
-    quality_picks = [r for r in top10 if r["score"] >= 2]
+    quality_picks = top_longs + top_shorts
     if len(quality_picks) < 3 and open_positions:
         needed      = 3 - len(quality_picks)
         hold_fills  = [p for p in open_positions if not p["is_stale"]][:needed]
@@ -2243,60 +2203,64 @@ def run_smart_scanner(
     except Exception as _wr_e:
         print(f"  ⚠️  Whale rider module error: {_wr_e}")
 
-    # ── Telegram summary: top 10 buys + top 10 whale ride suspects ────────
+    # ── Telegram summary: LONG/SHORT sections ────────
     try:
-        _send_telegram_top10(top10, all_whale_rides, fear_greed)
+        _send_telegram_valuable(top_longs, top_shorts, all_whale_rides, fear_greed)
     except Exception as _tg_e:
-        print(f"  ⚠️  Telegram top-10 summary failed: {_tg_e}")
+        print(f"  ⚠️  Telegram valuable summary failed: {_tg_e}")
 
     return top10, pump_coins, all_whale_rides, quality_count, _catalysts
 
 
-def _send_telegram_top10(
-    top10: list[dict],
+def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
+    """Helper to print a pick's details."""
+    supply_tag   = "  [⚠️ MED SUPPLY — HALF SIZE]" if r.get("supply_risk") == "MEDIUM" else ""
+    hold_tag      = "  [📌 OPEN — HOLD]" if r.get("_already_open") else ""
+    print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  score: {r['score']} pts{supply_tag}{hold_tag}")
+    print(f"     Price: ${r['price']:.4f}  |  24h: {r['change_24h']:+.1f}%  |  7d: {r['change_7d']:+.1f}%")
+    print(f"     RSI {r['rsi']:.1f}  |  MACD: {r['macd']}  |  Trend: {r['trend']}")
+    print(f"     Signals: {', '.join(r['reasons']) if r['reasons'] else 'none'}")
+    cat = catalysts.get(r["symbol"].upper(), "No recent news found")
+    print(f"     📰 News:  {cat}")
+
+
+def _send_telegram_valuable(
+    longs: list[dict],
+    shorts: list[dict],
     whale_rides: list[dict],
     fear_greed: dict,
 ) -> None:
-    """Send top-10 scanner picks and top-10 whale ride suspects to Telegram."""
+    """Send valuable LONG/SHORT picks to Telegram."""
     from src.utils.telegram import send_telegram
 
-    def _pfmt(p: float) -> str:
-        if p == 0:    return "$0"
-        if p >= 1:    return f"${p:,.2f}"
-        if p >= 0.01: return f"${p:.4f}"
-        return f"${p:.8f}"
+    def _f(v):
+        if v >= 1:    return f"${v:,.2f}"
+        if v >= 0.01: return f"${v:.4f}"
+        return f"${v:.8f}"
 
     fg_val   = (fear_greed or {}).get("value", 50)
     fg_label = (fear_greed or {}).get("label", "?")
-    lines_scanner = [f"<b>🔍 TOP 10 SCANNER PICKS — F&amp;G {fg_val}/100 ({fg_label})</b>\n"]
-    for i, r in enumerate(top10[:10], 1):
-        sym   = r.get("symbol", "?")
-        score = r.get("score", 0)
-        ch24  = r.get("change_24h", 0)
-        rsi   = r.get("rsi")
-        macd  = r.get("macd", "?")
-        price = r.get("price", 0)
-        rsi_s = f" RSI {rsi:.0f}" if rsi is not None else ""
-        lines_scanner.append(
-            f"  {i}. <b>{sym}</b> {_pfmt(price)}  score={score}  24h={ch24:+.1f}%{rsi_s}  MACD={macd}"
-        )
+    
+    msg = f"<b>💎 MOST VALUABLE PICKS — F&amp;G {fg_val}/100</b>\n"
+    
+    if longs:
+        msg += "\n🚀 <b>TOP LONGS:</b>\n"
+        for i, r in enumerate(longs, 1):
+            msg += f"  {i}. <b>{r['symbol']}</b> @ {_f(r['price'])} (Score {r['score']})\n"
+    
+    if shorts:
+        msg += "\n📉 <b>TOP SHORTS:</b>\n"
+        for i, r in enumerate(shorts, 1):
+            msg += f"  {i}. <b>{r['symbol']}</b> @ {_f(r['price'])} (Score {r['score']})\n"
 
-    lines_whale = ["\n<b>🐋 TOP WHALE RIDE SUSPECTS</b>\n"]
-    wr_shown = whale_rides[:10]
-    if wr_shown:
-        for wr in wr_shown:
-            sym   = wr.get("symbol", "?")
-            tier  = wr.get("ride_tier", "standard")
-            tp    = wr.get("take_profit", 0)
-            sl    = wr.get("stop_loss", 0)
-            crash = wr.get("crash_reason", "?")[:60]
-            tier_tag = " ⚡ RISKY" if tier == "risky" else ""
-            lines_whale.append(
-                f"  🐋 <b>{sym}</b>{tier_tag}  TP {_pfmt(tp)} / SL {_pfmt(sl)}\n"
-                f"     {crash}"
-            )
-    else:
-        lines_whale.append("  No whale ride suspects this scan.")
+    # Add best Whale Rides
+    val_wr = [wr for wr in whale_rides if wr.get("cycle_number", 0) >= 2][:3]
+    if val_wr:
+        msg += "\n🐋 <b>WHALE RIDES (Proven):</b>\n"
+        for wr in val_wr:
+            msg += f"  🐋 <b>{wr['symbol']}</b> (Cycle #{wr['cycle_number']}) — {wr['crash_reason'][:50]}...\n"
 
-    msg = "\n".join(lines_scanner) + "\n".join(lines_whale)
+    if not longs and not shorts and not val_wr:
+        msg += "\n<i>No high-confidence opportunities found this cycle.</i>"
+
     send_telegram(msg)

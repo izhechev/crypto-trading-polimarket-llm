@@ -412,6 +412,7 @@ _HEADERS = [
     "current_price",  # USD
     "price_eur",      # EUR (kept for reference; all display uses USD)
     "timeframe", "fear_greed", "reasoning",
+    "recommended_order",  # LONG / SHORT / NONE
     "groq_rank",      # 1/2/3 — Groq's ranking among top picks (empty if not a Groq pick)
     "qualifier",      # INSTANT_QUALIFIER | NEWS_BOOST | OVERSOLD_VOL | BASE_SCORE
     "key_signal",     # the one signal that pushed it into Groq's top 3
@@ -611,6 +612,7 @@ def log_recommendation(rec: dict, fear_greed_value: int) -> None:
         "timeframe":     rec.get("timeframe", ""),
         "fear_greed":    fear_greed_value,
         "reasoning":     base_reasoning + prev_note,
+        "recommended_order": rec.get("recommended_order", "NONE"),
     })
     _write(rows)
     print(f"  Logged {pid} → {LOG_PATH}")
@@ -657,6 +659,7 @@ def log_scanner_results(top10: list[dict], fear_greed_value: int) -> None:
             "take_profit": take_profit,
             "timeframe":   "3-7 days",
             "reasoning":   f"Score {r['score']}. " + ", ".join(reasons),
+            "recommended_order": r.get("recommended_order", "NONE"),
         }
         rows_before = len(_read())
         log_recommendation(rec, fear_greed_value)
@@ -1813,19 +1816,23 @@ def print_scan_summary(
     else:
         print("    (none)")
 
-    # ── 2. Top 10 scanner picks ───────────────────────────────────────────
-    print(f"\n  TOP 10 SCANNER PICKS:")
+    # ── 2. Most Valuable Scanner Picks ────────────────────────────────────
+    print(f"\n  MOST VALUABLE PICKS (Score ≥ 8):")
     if top10:
-        for i, r in enumerate(top10[:10], 1):
-            sym   = r.get("symbol", "?")
-            score = r.get("score", 0)
-            ch24  = r.get("change_24h", 0)
-            rsi   = r.get("rsi")
-            macd  = r.get("macd", "?")
-            price = r.get("price", 0)
-            rsi_s = f"  RSI {rsi:.0f}" if rsi is not None else ""
-            arch  = f"  [{r['archetype']}]" if r.get("archetype") else ""
-            print(f"    {i:2}. {sym:8s}  score={score}  {_pe(price)}  24h={ch24:+.1f}%{rsi_s}  MACD={macd}{arch}")
+        valuable = [r for r in top10 if int(r.get("score", 0)) >= 8]
+        longs  = [r for r in valuable if r.get("recommended_order") == "LONG"]
+        shorts = [r for r in valuable if r.get("recommended_order") == "SHORT"]
+        
+        if longs:
+            print("    🚀 LONGS:")
+            for i, r in enumerate(longs[:5], 1):
+                print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pe(r['price'])}")
+        if shorts:
+            print("    📉 SHORTS:")
+            for i, r in enumerate(shorts[:5], 1):
+                print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pe(r['price'])}")
+        if not longs and not shorts:
+            print("    (none this scan)")
     else:
         print("    (no scan results)")
 
@@ -1849,17 +1856,18 @@ def print_scan_summary(
     else:
         print("    (none)")
 
-    # ── 4. Top 10 whale ride suspects ─────────────────────────────────────
-    print(f"\n  TOP 10 WHALE RIDE SUSPECTS:")
+    # ── 4. Proven Whale Rides ─────────────────────────────────────────────
+    print(f"\n  PROVEN WHALE RIDE CANDIDATES (Cycle ≥ 2):")
     if whale_rides:
-        for i, wr in enumerate(whale_rides[:10], 1):
-            sym  = wr.get("symbol", "?")
-            tp   = wr.get("take_profit", 0)
-            sl   = wr.get("stop_loss", 0)
-            tier = wr.get("ride_tier", "standard")
-            tier_tag = " ⚡RISKY" if tier == "risky" else ""
-            crash = wr.get("crash_reason", "?")[:55]
-            print(f"    {i:2}. {sym:8s}{tier_tag}  TP {_pe(tp)} / SL {_pe(sl)}  — {crash}")
+        proven_wr = [wr for wr in whale_rides if int(wr.get("cycle_number", 0)) >= 2]
+        if proven_wr:
+            for i, wr in enumerate(proven_wr[:5], 1):
+                sym = wr.get("symbol", "?")
+                cyc = wr.get("cycle_number", "?")
+                print(f"    {i:2}. {sym:8s} (Cycle #{cyc}) — {wr.get('crash_reason','')[:50]}...")
+        else:
+            # print("    (none high confidence)")
+            pass
     else:
         # print("    (none this scan)")
         pass
