@@ -456,41 +456,6 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
     else:
         print("    (none)")
 
-    # ── Most Valuable Picks (Scanner) ──
-    if top10:
-        longs  = [r for r in top10 if r.get("recommended_order") == "LONG"]
-        shorts = [r for r in top10 if r.get("recommended_order") == "SHORT"]
-        spots  = [r for r in top10 if r.get("recommended_order") == "SPOT"]
-        
-        if longs or shorts or spots:
-            print(f"\n  🎯  MOST VALUABLE SCANNER PICKS:")
-            if longs:
-                print("    🚀 LONGS:")
-                for i, r in enumerate(longs, 1):
-                    print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
-            if shorts:
-                print("    📉 SHORTS:")
-                for i, r in enumerate(shorts, 1):
-                    print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
-            if spots:
-                print("    💰 SPOTS:")
-                for i, r in enumerate(spots, 1):
-                    print(f"      {i}. {r['symbol']:8s} score={r['score']}  {_pfmt(r['price'])}")
-        else:
-            print("\n  ℹ️  No high-conviction scanner picks this round.")
-
-    # ── Valuable Whale Rides ──
-    if whale_rides:
-        print(f"\n  🌊  VALUABLE WHALE RIDE CANDIDATES:")
-        for i, wr in enumerate(whale_rides, 1):
-            sym = wr.get("symbol", "?")
-            cyc = wr.get("cycle_number", "?")
-            score = wr.get("hc_score", "?")
-            print(f"    {i:2}. {sym:8s} (Cycle #{cyc} | Score {score}/8)")
-    else:
-        print("\n  🐋  No high-conviction whale rides this round.")
-
-
 def print_track_record() -> None:
     """Print category-specific win/loss records."""
     rows = _read()

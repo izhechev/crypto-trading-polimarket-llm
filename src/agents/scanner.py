@@ -2056,11 +2056,11 @@ def run_smart_scanner(
             pass
         normal_results = [r for r in normal_results if r["symbol"].upper() not in approaching_tp]
 
-    # ── Most Valuable Only ──
-    # Show Top Long/Short/Spot picks (no score gate, user wants "top" of each)
-    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG"]
-    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT"]
-    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT"]
+    # ── God-Tier Only ──
+    # Show Top Long/Short/Spot picks that meet 100% confidence technical score thresholds
+    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG" and r.get("score", 0) >= 10]
+    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT" and r.get("score", 0) >= 10]
+    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT" and r.get("score", 0) >= 8]
     top10 = normal_results[:10]
 
     # Fetch 1-sentence news catalysts for actual picks
