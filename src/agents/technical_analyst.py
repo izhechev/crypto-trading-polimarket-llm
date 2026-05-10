@@ -164,9 +164,9 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
 
     # Final Verdict
     recommended_order = "NONE"
-    if bullish_score >= 10: recommended_order = "LONG"
-    elif bearish_score >= 10: recommended_order = "SHORT"
-    elif bullish_score >= 5: recommended_order = "SPOT"
+    if bullish_score >= 7: recommended_order = "LONG"
+    elif bearish_score >= 7: recommended_order = "SHORT"
+    elif bullish_score >= 3: recommended_order = "SPOT"
 
     if bullish_score > bearish_score:
         trend = "BULLISH"
