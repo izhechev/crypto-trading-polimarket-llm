@@ -424,7 +424,7 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
                 pnl = ((entry - curr) if is_short else (curr - entry)) / entry * 100 if entry > 0 else 0
                 icon = "🟢" if pnl >= 0 else "🔴"
                 side = r.get("recommended_order", "SPOT")
-                print(f"    {icon} {r['coin']:8s}  {pnl:+.1f}% ({side})  [{age_str}]  entry {entry:.4f}  now {curr:.4f}")
+                print(f"    {icon} {r['coin']:8s}  {pnl:+.1f}% ({side})  [{age_str}]  entry {_pfmt(entry)}  now {_pfmt(curr)}")
             except Exception: pass
     else:
         print("    (none)")
@@ -442,7 +442,7 @@ def print_scan_summary(top10: list[dict] | None = None, whale_rides: list[dict] 
                 except Exception: age_str = "?h"
                 pnl = (curr - entry) / entry * 100 if entry > 0 else 0
                 icon = "🟢" if pnl >= 0 else "🔴"
-                print(f"    {icon} {r['coin']:8s}  {pnl:+.1f}%  [{age_str}]  entry {entry:.4f}  now {curr:.4f}")
+                print(f"    {icon} {r['coin']:8s}  {pnl:+.1f}%  [{age_str}]  entry {_pfmt(entry)}  now {_pfmt(curr)}")
             except Exception: pass
     else:
         print("    (none)")
