@@ -490,52 +490,8 @@ def run_scan_cycle(
     bar = "█" * bar_len + "░" * (50 - bar_len)
     print(f"  [{bar}] {fg['value']}/100 — {fg['label']}")
 
-    # Scanner
+    # Scanner - returns only valuable_wr
     top10, pump_alerts, whale_rides, quality_count, tavily_catalysts = run_smart_scanner(exchange=exchange, fear_greed=fg, open_count=_open_count)
-
-    # Log whale ride candidates — must happen BEFORE early-return so rides are
-    # recorded even when top10 is empty (e.g. all OHLCV failed this cycle).
-    if whale_rides:
-        from src.utils.logger import log_whale_ride
-        from src.utils.telegram import send_telegram as _send_tg
-
-        def _fp(v):
-            if not isinstance(v, (int, float)) or v == 0:
-                return "$0"
-            if v >= 1:
-                return f"${v:,.2f}"
-            if v >= 0.01:
-                return f"${v:.4f}"
-            return f"${v:.8f}"
-
-        for wr in whale_rides:
-            log_whale_ride(wr, fg.get("value", 0))
-            _sym  = wr["symbol"]
-            _name = wr.get("name", _sym)
-            _ep   = wr["entry"]
-            _sl   = wr["stop_loss"]
-            _tp   = wr["take_profit"]
-            _hold = wr["max_hold_hours"]
-            _cyc  = wr["cycle_number"]
-            _ch24 = wr.get("change_24h", 0)
-            _ch7d = wr.get("change_7d", 0)
-            _scam = wr["is_serial_scam"]
-            _cycles_str = " → ".join(wr["known_cycles"]) if wr["known_cycles"] else "first recorded"
-            _risk_tag = "🚨 SERIAL SCAM" if _scam else "⚠️ HIGH RISK"
-            _tg_msg = (
-                f"🐋 <b>WHALE RIDE — {_sym}</b> ({_name})\n\n"
-                f"  Price:   {_fp(_ep)}\n"
-                f"  24h:     {_ch24:+.1f}%\n"
-                f"  7d:      {_ch7d:+.1f}%\n\n"
-                f"  Entry: {_fp(_ep)}  |  SL: {_fp(_sl)} (-15%)  |  TP: {_fp(_tp)} (+50%)\n"
-                f"  Max hold: {_hold}h  |  Cycle #{_cyc}: {_cycles_str}\n\n"
-                f"  {_risk_tag} — manipulated token\n"
-                f"  Max 5% of portfolio — EXTREME RISK"
-            )
-            try:
-                _send_tg(_tg_msg)
-            except Exception as _te:
-                print(f"  ⚠️  Whale ride Telegram failed for {_sym}: {_te}")
 
     if not top10:
         print("  No results from scanner — skipping analysis.")

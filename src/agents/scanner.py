@@ -2308,7 +2308,7 @@ def run_smart_scanner(
     except NameError:
         quality_count = 0
 
-    return top10, pump_coins, all_whale_rides, quality_count, _catalysts
+    return top10, pump_coins, valuable_wr, quality_count, _catalysts
 
 
 def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
