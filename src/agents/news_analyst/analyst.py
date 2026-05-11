@@ -29,16 +29,29 @@ class NewsAnalyst:
         if not news_data:
             return {"verdict": "neutral", "score": 0, "summary": "No news data"}
 
-        headlines = "\n".join([f"- {n.get('title')}" for n in news_data])
-        prompt = f"""
-        Analyze these news headlines for {coin_symbol} and determine if they represent a real trade catalyst (partnerships, mainnet, etc.).
-        Respond in JSON with: "verdict" (bullish/bearish/neutral), "score" (0-10), "catalyst_type", "summary".
+        # Combine title and snippet for maximum context
+        context = "\n".join([
+            f"- Title: {n.get('title')}\n  Snippet: {n.get('snippet', 'No content')}" 
+            for n in news_data
+        ])
         
-        Headlines:
-        {headlines}
+        prompt = f"""
+        Analyze these crypto news items for {coin_symbol}. Determine if they represent a CONCRETE, fundamental trade catalyst.
+        
+        Hard catalysts: Mainnet launches, strategic partnerships, exchange listings (major), funding rounds, ETF approvals, or major protocol upgrades.
+        Speculative/Noise: Price predictions, generic market commentary, vague social media hype.
+
+        Respond ONLY in JSON with:
+        - "verdict": "bullish" | "bearish" | "neutral"
+        - "score": (integer 0-10 based on catalyst strength)
+        - "catalyst_type": ("partnership", "mainnet", "listing", "funding", "etf", "launch", "upgrade", "buyback", or "none")
+        - "summary": (concise explanation of the fundamental impact)
+
+        Data:
+        {context}
         """
         
-        return self.llm.call(prompt, system_prompt="You are a crypto news analyst.")
+        return self.llm.call(prompt, system_prompt="You are a strict, skeptical crypto fundamental analyst.")
 
 if __name__ == "__main__":
     # Debug mode test
