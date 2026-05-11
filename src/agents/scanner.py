@@ -1837,7 +1837,6 @@ def run_smart_scanner(
 
             ts, tr = _ta_score(ta.rsi_14, ta.macd_signal, ta.bollinger_position, vol_mcap=vm)
             cs, cr = _catalyst_score(coin, ta.rsi_14, trend=trend_val, change_7d=change_7d)
-            ns, nr = _news_score(per_coin_news.get(symbol, []), symbol=symbol, coin_name=coin.get("name", ""))
             ss, sr = _sector_score(symbol, sector_avgs)
 
             coiled_spring = ath_pct < -90 and ta.rsi_14 is not None and ta.rsi_14 < 35
