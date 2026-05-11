@@ -35,7 +35,6 @@ function App() {
 
   const fetchPositions = async () => {
     try {
-      // Use timestamp to prevent browser caching
       const res = await fetch(`/api/positions?t=${Date.now()}`)
       const data = await res.json()
       if (data && data.positions) {
@@ -62,11 +61,17 @@ function App() {
   }
 
   const runScan = async () => {
+    console.log("Triggering market scan...");
     try {
-      await fetch('/api/scan', { method: 'POST' })
+      // Direct absolute URL call to ensure it bypasses any proxy quirk
+      const res = await fetch('http://localhost:8001/api/scan', { method: 'POST' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      console.log("Scan request accepted.");
       fetchScanStatus()
     } catch (e) {
-      console.error("Failed to start scan", e)
+      console.error("Failed to start scan:", e)
+      // Fallback to relative
+      fetch('/api/scan', { method: 'POST' }).catch(() => {});
     }
   }
 
@@ -83,13 +88,22 @@ function App() {
   const formatPrice = (val: number) => {
     if (val === undefined || val === null) return '$0.00'
     const abs = Math.abs(val)
-    const decimals = abs >= 1 ? 2 : abs >= 0.01 ? 4 : abs >= 0.0001 ? 6 : 8
+    // 2 for large, 4 for medium, 6 for small, 8 for tiny, 10 for ultra-small (memes)
+    const decimals = abs >= 1 ? 2 : abs >= 0.01 ? 4 : abs >= 0.0001 ? 6 : abs >= 0.00001 ? 8 : 10
     return `$${val.toFixed(decimals)}`
   }
 
   const formatCurrency = (val: number, currency: string = '€') => {
     if (val === undefined || val === null) return `${currency}0.00`
     return `${currency}${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  }
+
+  const getLogoUrl = (pos: Position) => {
+    // If the backend provided a logo (cached CG or high-reliability CDN)
+    if (pos.logo_url && pos.logo_url.length > 5) return pos.logo_url;
+    
+    // Hard fallback to spothq icons for symbols
+    return `https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${pos.symbol.toLowerCase()}.png`;
   }
 
   return (
@@ -144,25 +158,22 @@ function App() {
                 <div key={idx} className="position-card glass">
                   <div className="card-header">
                     <div className="coin-info">
-                      {pos.logo_url ? (
-                        <img 
-                          src={pos.logo_url} 
-                          alt={pos.symbol} 
-                          className="coin-logo" 
-                          onError={(e) => {
-                            (e.target as HTMLImageElement).style.display = 'none';
-                            const parent = (e.target as HTMLImageElement).parentElement;
-                            if (parent) {
-                              const placeholder = document.createElement('div');
-                              placeholder.className = 'coin-logo-placeholder';
-                              placeholder.innerText = pos.symbol[0];
-                              parent.prepend(placeholder);
-                            }
-                          }}
-                        />
-                      ) : (
-                        <div className="coin-logo-placeholder">{pos.symbol[0]}</div>
-                      )}
+                      <img 
+                        src={getLogoUrl(pos)} 
+                        alt={pos.symbol} 
+                        className="coin-logo" 
+                        onError={(e) => {
+                          const target = e.target as HTMLImageElement;
+                          target.style.display = 'none';
+                          const parent = target.parentElement;
+                          if (parent && !parent.querySelector('.coin-logo-placeholder')) {
+                            const placeholder = document.createElement('div');
+                            placeholder.className = 'coin-logo-placeholder';
+                            placeholder.innerText = pos.symbol[0];
+                            parent.prepend(placeholder);
+                          }
+                        }}
+                      />
                       <div>
                         <h3>{pos.symbol}</h3>
                         <span className="coin-name">{pos.coin}</span>
@@ -244,7 +255,7 @@ function App() {
             )}
           </h2>
           <div className="terminal glass">
-            {scanStatus.last_output || 'No scan data available. Click "Run Scan" to start.'}
+            {scanStatus.last_output || 'Waiting for scan output...'}
           </div>
         </section>
       </main>

@@ -313,7 +313,7 @@ def update_open_positions() -> None:
         
         pnl_pct = base_pnl_pct
             
-        row["current_price"] = str(round(usd, 8))
+        row["current_price"] = str(round(usd, 12))
         row["pnl_pct"] = str(round(pnl_pct, 2))
 
         try:
@@ -375,7 +375,7 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
     if any(r.get("status") == "OPEN" and r.get("coin", "").upper() == coin for r in rows):
         return
 
-    entry = round(wr.get("entry", 0), 8)
+    entry = round(wr.get("entry", 0), 12)
     rows.append({
         "date":          datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "type":          "WHALE_RIDE",
@@ -410,10 +410,10 @@ def close_whale_rider_position(sym: str, current_price: float, exit_reason: str 
 
             status = "WIN" if pnl_pct >= 10.0 else "LOSS"
             row["status"]        = status
-            row["exit_price"]    = round(current_price, 8)
+            row["exit_price"]    = round(current_price, 12)
             row["close_date"]    = _now_str
             row["pnl_pct"]       = round(pnl_pct, 2)
-            row["current_price"] = round(current_price, 8)
+            row["current_price"] = round(current_price, 12)
             row["reasoning"]     = row.get("reasoning", "") + f" | EXIT: {exit_reason}"
             changed = True
             icon = "✅" if status == "WIN" else "❌"

@@ -228,24 +228,30 @@ h2 {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-height: 48px;
 }
 
 .coin-logo {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 2px;
 }
 
 .coin-logo-placeholder {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
-  background: #38bdf822;
-  color: #38bdf8;
+  background: linear-gradient(135deg, #38bdf8 0%, #0d4a7a 100%);
+  color: white;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: bold;
+  font-weight: 900;
+  font-size: 1.2rem;
+  box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
 }
 
 .coin-info h3 {

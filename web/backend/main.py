@@ -8,7 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -24,6 +25,16 @@ from src.connectors.coingecko import fetch_prices
 from src.connectors.kraken import fetch_kraken_portfolio
 
 app = FastAPI(title="CryptoAdvisor API")
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"CRITICAL ERROR: {exc}")
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error", "error": str(exc)},
+    )
 
 # Enable CORS
 app.add_middleware(
@@ -165,6 +176,15 @@ class PositionsResponse(BaseModel):
     net_worth_eur: float
     total_pnl_pct: float
 
+def get_logo_url(symbol: str, coin_id: Optional[str]) -> Optional[str]:
+    """Get logo URL with high-reliability CDN fallbacks."""
+    if coin_id and logo_cache.get(coin_id):
+        return logo_cache[coin_id]
+    
+    # High-reliability CDN Fallback (TrustWallet / spothq)
+    s = symbol.lower()
+    return f"https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/{s}.png"
+
 @app.get("/api/positions", response_model=PositionsResponse)
 async def get_positions():
     positions = []
@@ -174,11 +194,14 @@ async def get_positions():
     rec_path = config.DATA_DIR / "recommendations.csv"
     open_recs = []
     if rec_path.exists():
-        with open(rec_path, mode='r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if row.get("status") == "OPEN":
-                    open_recs.append(row)
+        try:
+            with open(rec_path, mode='r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("status") == "OPEN":
+                        open_recs.append(row)
+        except Exception as e:
+            print(f"CSV read error: {e}")
     
     try:
         holdings, _ = fetch_kraken_portfolio()
@@ -217,7 +240,7 @@ async def get_positions():
             pnl_pct=pnl,
             type=rec.get("type") or "SCANNER",
             status="OPEN",
-            logo_url=logo_cache.get(cid),
+            logo_url=get_logo_url(symbol, cid),
             stop_loss=float(rec.get("stop_loss")) if rec.get("stop_loss") else None,
             take_profit=float(rec.get("take_profit")) if rec.get("take_profit") else None,
             reasoning=reasoning,
@@ -255,7 +278,7 @@ async def get_positions():
                 pnl_pct=pnl,
                 type="PORTFOLIO",
                 status="OPEN",
-                logo_url=logo_cache.get(cid),
+                logo_url=get_logo_url(symbol, cid),
             ))
 
     total_pnl_pct = ((total_current_value_eur - total_investment_eur) / total_investment_eur * 100) if total_investment_eur > 0 else 0
@@ -270,13 +293,21 @@ async def get_positions():
 async def get_scan_status():
     return ScanStatus(**scan_state)
 
+@app.post("/api/scan/reset")
+async def reset_scan():
+    global scan_state
+    scan_state["is_running"] = False
+    scan_state["last_output"] += "\n--- SCAN STATE MANUALLY RESET ---\n"
+    return {"message": "Scan state reset"}
+
 def run_scan_task():
     global scan_state
-    print(f"[{datetime.now()}] Background scan task started.")
+    print(f"[{datetime.now()}] Starting background scan subprocess...")
     scan_state["is_running"] = True
-    scan_state["last_output"] = "Scan started...\n"
+    scan_state["last_output"] = "--- SCAN INITIATED ---\n"
     
-    cmd = [sys.executable, str(PROJECT_ROOT / "run.py"), "--scan"]
+    # Use explicit python command and shell=True for Windows compatibility
+    cmd = f'"{sys.executable}" run.py --scan'
     try:
         process = subprocess.Popen(
             cmd,
@@ -285,28 +316,30 @@ def run_scan_task():
             text=True,
             cwd=str(PROJECT_ROOT),
             encoding="utf-8",
-            errors="replace"
+            errors="replace",
+            shell=True
         )
         
-        output = ""
+        output = scan_state["last_output"]
         for line in iter(process.stdout.readline, ""):
             output += line
+            lines = output.splitlines()[-200:]
+            output = "\n".join(lines) + "\n"
             scan_state["last_output"] = output
             
         process.wait()
         scan_state["last_scan_ts"] = datetime.now()
-        print(f"[{datetime.now()}] Background scan task completed. Exit code: {process.returncode}")
+        scan_state["last_output"] += f"\n--- SCAN COMPLETED [Exit: {process.returncode}] ---"
+        print(f"[{datetime.now()}] Scan subprocess finished.")
     except Exception as e:
-        print(f"[{datetime.now()}] Background scan task failed: {e}")
-        scan_state["last_output"] += f"\nERROR: {e}"
+        print(f"[{datetime.now()}] Scan subprocess CRASHED: {e}")
+        scan_state["last_output"] += f"\nFATAL ERROR: {e}"
     finally:
         scan_state["is_running"] = False
 
 @app.post("/api/scan")
 async def start_scan(background_tasks: BackgroundTasks):
-    print(f"[{datetime.now()}] POST /api/scan")
     if scan_state["is_running"]:
-        print("Scan already in progress.")
         raise HTTPException(status_code=400, detail="Scan already in progress")
     
     background_tasks.add_task(run_scan_task)
