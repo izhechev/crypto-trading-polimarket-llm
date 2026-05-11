@@ -713,9 +713,9 @@ def get_top10_catalysts(coins: list[dict]) -> dict[str, str]:
     return result
 
 
-def _parse_age_days(date_val) -> int | None:
+def _parse_age_hours(date_val) -> float | None:
     """
-    Parse a date value and return how many days ago it was published.
+    Parse a date value and return how many hours ago it was published.
     Handles:
       - Unix timestamp (int/float)
       - RFC-2822 string  "Mon, 07 Apr 2026 12:00:00 GMT"  (Google News RSS pubDate)
@@ -730,14 +730,14 @@ def _parse_age_days(date_val) -> int | None:
         # Unix timestamp
         if isinstance(date_val, (int, float)) and date_val > 0:
             published = datetime.fromtimestamp(float(date_val), tz=timezone.utc)
-            return max(0, (now - published).days)
+            return max(0, (now - published).total_seconds() / 3600)
         if isinstance(date_val, str):
             # ISO 8601: "2026-04-10T14:23:00Z" or "2026-04-10T14:23:00+00:00"
             if "T" in date_val:
                 published = datetime.fromisoformat(date_val.replace("Z", "+00:00"))
                 if published.tzinfo is None:
                     published = published.replace(tzinfo=timezone.utc)
-                return max(0, (now - published).days)
+                return max(0, (now - published).total_seconds() / 3600)
             # RFC-2822: "Mon, 07 Apr 2026 12:00:00 GMT" — Google News pubDate
             # Try email.utils first (most reliable for strict RFC-2822)
             try:
@@ -745,7 +745,7 @@ def _parse_age_days(date_val) -> int | None:
                 published = parsedate_to_datetime(date_val)
                 if published.tzinfo is None:
                     published = published.replace(tzinfo=timezone.utc)
-                return max(0, (now - published).days)
+                return max(0, (now - published).total_seconds() / 3600)
             except Exception:
                 pass
             # Fallback: strptime for common variations
@@ -759,7 +759,7 @@ def _parse_age_days(date_val) -> int | None:
                     published = datetime.strptime(date_val, fmt)
                     if published.tzinfo is None:
                         published = published.replace(tzinfo=timezone.utc)
-                    return max(0, (now - published).days)
+                    return max(0, (now - published).total_seconds() / 3600)
                 except ValueError:
                     continue
     except Exception:
@@ -777,8 +777,8 @@ def fetch_news_for_coins(
       2. Google News RSS  — free, no key, always returns results
       3. CryptoPanic      — by ticker then by name (requires CRYPTOPANIC_API_KEY)
 
-    Returns {symbol: [{"title": str, "age_days": int|None, "source": str}, ...]}
-    age_days=0 means published today; None means date unknown.
+    Returns {symbol: [{"title": str, "age_hours": float|None, "is_recent": bool, "source": str}, ...]}
+    age_hours=0.5 means published 30 mins ago; None means date unknown.
     """
     import re as _re
     per_coin: dict[str, list[dict]] = {}
@@ -798,10 +798,12 @@ def fetch_news_for_coins(
         def _add(title: str, date_val, source: str = "") -> None:
             if title and title not in seen:
                 seen.add(title)
+                age_h = _parse_age_hours(date_val)
                 items.append({
-                    "title":    title,
-                    "age_days": _parse_age_days(date_val),
-                    "source":   source,
+                    "title":     title,
+                    "age_hours": age_h,
+                    "is_recent": (age_h is not None and age_h <= 2.0),
+                    "source":    source,
                 })
 
         if _use_tavily:

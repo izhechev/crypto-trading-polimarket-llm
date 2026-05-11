@@ -74,8 +74,35 @@ _CRASH_DROP_PCT   = 30.0   # post-crash bounce: must have dropped ≥30% from pe
 _CRASH_RSI_MAX    = 30.0   # RSI must be oversold (<30) for bounce entry
 _CRASH_VOL_MAX    = 0.30   # volume must be dying (low vol = stable bottom)
 
+# ── Noise-Beater Thresholds ──────────────────────────────────────────────────
+_NB_MIN_VOL_24H   = 20_000_000  # $20M min volume for Noise-Beater signals
+_NB_MIN_MCAP_MEME = 100_000_000 # $100M min MCAP for memecoins
+_NB_RSI_MIN       = 45.0
+_NB_RSI_MAX       = 75.0
+_NB_ATR_MAX_PCT   = 8.0         # Skip if ATR(14) > 8% of price (too choppy)
+_NB_BTC_6H_MAX_CHG = 3.0        # BTC must be within +/- 3% (sideways)
+
 # ── Alert deduplication ───────────────────────────────────────────────────────
 _DUPLICATE_HOURS  = 2      # re-alert same coin every 2h (was 24h)
+
+
+# ── Internal Helpers ──────────────────────────────────────────────────────────
+
+def _is_btc_sideways() -> bool:
+    """Check if BTC has moved < +/- 3% in the last 6 hours."""
+    from src.connectors.coingecko import fetch_ohlcv
+    try:
+        # days=1 returns hourly candles (24 candles)
+        ohlcv = fetch_ohlcv("bitcoin", days=1)
+        if len(ohlcv) < 6:
+            return True # Assume sideways if no data
+        
+        curr_p = ohlcv[-1]["close"]
+        prev_p = ohlcv[-6]["close"] # 6 hours ago
+        chg = (curr_p - prev_p) / prev_p * 100
+        return abs(chg) <= _NB_BTC_6H_MAX_CHG
+    except Exception:
+        return True # Default to true on error to not block trades
 
 # ── Session-level entry tracking ─────────────────────────────────────────────
 # Populated when an entry alert is sent. Exit signals are ONLY sent for coins
@@ -245,9 +272,6 @@ def detect_whale_rides(
         total = coin.get("total_supply") or 0
 
         # Skip LATE stage coins — they go to watchlist, not pump alerts.
-        # EXCEPTION: if a coin is surging 30%+ TODAY but we only first see it when
-        # 7d is already high (fast mover), still run the volume check — it may be
-        # the start of a new leg, not a stale pump.
         _new_leg_burst = ch24 >= 30.0 and ch7d >= _7D_LATE_MIN
         if ch7d >= _7D_LATE_MIN and not _new_leg_burst:
             continue
@@ -272,24 +296,20 @@ def detect_whale_rides(
         avg_vol = _avg_volume(hist, sym)
         _cold_start = False
         if avg_vol is None or avg_vol <= 0:
-            # Cold-start fallback: no 3-day history yet.
-            # Baseline estimated_avg = mcap * 0.05 (coins normally trade ~5% vol/mcap).
-            # Fires when vol/mcap > 0.10 (2x the baseline × _VOL_EARLY_MULT).
             if mcap > 0 and ch24 >= _PRICE_EARLY_MIN:
                 _est_avg = mcap * 0.05
                 if vol > _est_avg * _VOL_EARLY_MULT:
                     avg_vol   = _est_avg
-                    _cold_start = True   # flag so alert includes cold-start warning
+                    _cold_start = True
                 else:
-                    continue   # not enough volume to be interesting even without history
+                    continue
             else:
-                continue   # no history, no signal
+                continue
 
         vol_ratio = vol / avg_vol
 
-        # Classify stage by vol multiplier + price range
+        # Classify stage
         if _new_leg_burst and ch24 >= _PRICE_MID_MAX and vol_ratio >= _VOL_MID_MULT:
-            # Extreme single-day burst (>100% 24h) — very high risk, mark clearly
             stage = "MID"
         elif vol_ratio >= _VOL_MID_MULT and _PRICE_EARLY_MAX <= ch24 < _PRICE_MID_MAX:
             stage = "MID"
@@ -304,13 +324,9 @@ def detect_whale_rides(
         ):
             stage = "PRE"
         else:
-            continue   # no anomaly
+            continue
 
         # 24h momentum check vs previous scan
-        # NOTE: only PRE requires strictly accelerating momentum.
-        # EARLY/MID only die if ch24 drops BELOW the stage's entry floor —
-        # the 24h rolling window naturally decays as the pump ages, so a coin
-        # at +34% peaking to +21% should still fire, not get silenced.
         prev_24h_entry = seen_24h.get(sym)
         if prev_24h_entry:
             prev_ts = prev_24h_entry.get("ts", 0)
@@ -319,20 +335,47 @@ def detect_whale_rides(
                 if stage == "PRE":
                     prev_ch24 = prev_24h_entry.get("ch24", ch24)
                     if ch24 <= prev_ch24:
-                        continue   # PRE requires strictly accelerating 24h%
+                        continue
                 elif stage == "EARLY" and ch24 < _PRICE_EARLY_MIN:
-                    continue   # pump unwound below entry floor
+                    continue
                 elif stage == "MID" and ch24 < _PRICE_EARLY_MAX:
-                    continue   # pump unwound below MID floor
+                    continue
         elif stage == "PRE":
-            continue   # PRE with no prior reading = can't confirm acceleration
+            continue
+
+        # ── Noise-Beater Technical Check ──
+        # (Only run for coins that pass initial anomaly detection)
+        from src.connectors.coingecko import fetch_ohlcv
+        from src.agents.technical_analyst import compute_ta
+        
+        cid = coin.get("_cg_id") or coin.get("id", "")
+        # Daily OHLCV for ATR(14)
+        ohlcv_d = fetch_ohlcv(cid, days=30)
+        # Hourly OHLCV for EMA(20)
+        ohlcv_h = fetch_ohlcv(cid, days=1)
+        
+        ta_d = compute_ta(cid, sym, ohlcv_d)
+        ta_h = compute_ta(cid, sym, ohlcv_h)
+        
+        atr_pct = ta_d.atr_pct or 0
+        rsi_14  = ta_d.rsi_14 or 50
+        ema_20_h = ta_h.ema_20 or 0
+        curr_p  = coin.get("current_price", 0)
+        
+        # Disqualify if too choppy or overbought
+        is_choppy = atr_pct > _NB_ATR_MAX_PCT
+        is_exhausted = rsi_14 > _NB_RSI_MAX or rsi_14 < _NB_RSI_MIN
+        is_below_trend = curr_p < ema_20_h if ema_20_h > 0 else False
+        
+        if is_choppy or is_exhausted or is_below_trend:
+            continue
 
         vm = vol / max(mcap, 1)
         candidates.append({
             "symbol":       sym,
             "name":         coin.get("name", sym),
-            "coin_id":      coin.get("_cg_id") or coin.get("id", ""),
-            "price":        coin.get("current_price", 0),
+            "coin_id":      cid,
+            "price":        curr_p,
             "change_24h":   ch24,
             "change_7d":    ch7d,
             "vol_mcap":     round(vm, 3),
@@ -345,6 +388,9 @@ def detect_whale_rides(
             "stage":        stage,
             "risk_cat":     cat,
             "cold_start":   _cold_start,
+            "atr_pct":      round(atr_pct, 2),
+            "rsi_14":       round(rsi_14, 1),
+            "ema_20_h":     ema_20_h,
         })
 
     # Update last-seen 24h
@@ -389,39 +435,64 @@ def send_whale_ride_alerts(
     pre_alerts = data.setdefault("pre_alerts", {})
     fg_value   = (fear_greed or {}).get("value", 50)
 
-    # ── High-Conviction Filter Logic ──────────────────────────────────────────
+    # ── High-Conviction Filter Logic (Noise-Beater Edition) ───────────────────
     high_conviction = []
+    
+    # 0. Global Market Check (BTC Sideways)
+    if not _is_btc_sideways():
+        return [] # Skip all signals if BTC is volatile
+
+    # Fetch news for all candidates to check for "Recent News" disqualifier
+    from src.connectors.web_research import fetch_news_for_coins
+    news_map = fetch_news_for_coins(candidates, limit_per_coin=3)
+
     for c in candidates:
+        sym       = c["symbol"]
         mcap      = c["mcap"]
+        vol_24h   = c["vol_usd"]
         vol_mult  = c["vol_ratio"]
         vol_mcap  = c["vol_mcap"]
         ch24      = c["change_24h"]
         ch7d      = c["change_7d"]
         ath_dist  = c["ath_change"]
         stage     = c["stage"]
-        sym       = c["symbol"]
+        risk_cat  = c.get("risk_cat", "NORMAL")
 
-        # 1. HARD FILTERS
-        if mcap > 400_000_000: continue
+        # 1. NOISE-BEATER HARD FILTERS
+        
+        # Liquidity & Size Floor
+        if vol_24h < _NB_MIN_VOL_24H: continue
+        
+        # Memecoin MCAP Floor
+        is_meme = any(p in risk_cat.upper() for p in ("MEME", "DOG", "CAT", "PEPE", "INU"))
+        if is_meme and mcap < _NB_MIN_MCAP_MEME: continue
+        
+        # Recent News Disqualifier (Anti-Hype)
+        coin_news = news_map.get(sym, [])
+        if any(n.get("is_recent") for n in coin_news):
+            # print(f"  🚫 Skipping {sym}: Recent news detected (< 2h old)")
+            continue
+
+        # Standard filters
+        if mcap > 1_000_000_000: continue # Cap at $1B for whale rides
         
         # Vol multiplier filter
         vol_threshold = 2.0 if mcap < 30_000_000 else 3.0
         if vol_mult < vol_threshold: continue
         
         if vol_mcap > 0.60: continue
-        if not (5.0 <= ch24 <= 30.0): continue
-        if ath_dist > -20.0: continue
+        if not (2.0 <= ch24 <= 30.0): continue # Expanded lower bound per NB rules
+        if ath_dist > -15.0: continue
         
-        # Stage filter: EARLY preferred, MID only if 7d > 100%
+        # Stage filter
         if stage not in ("EARLY", "MID"): continue
-        if stage == "MID" and ch7d <= 100.0: continue
 
         # 2. BONUS SCORE
         score = 0
-        if mcap < 50_000_000: score += 2
-        if ch7d > 25.0:       score += 2
-        if vol_mult > 5.0:    score += 1
-        if ath_dist < -80.0:  score += 1
+        if mcap < 100_000_000: score += 2
+        if ch7d > 25.0:        score += 2
+        if vol_mult > 5.0:     score += 1
+        if ath_dist < -80.0:   score += 1
         if 0.10 <= vol_mcap <= 0.35: score += 1
         
         # Persistence check (2+ times in 48h)
@@ -431,9 +502,9 @@ def send_whale_ride_alerts(
             score += 1
         
         # 3. God-Tier Filter (100% Confidence Mode)
-        # Require Score >= 7 OR Cycle >= 3
+        # Require Score >= 6 OR Cycle >= 3 (Lowered score bar due to tighter technical filters)
         _cyc = len([h for h in hits if now_ts - h <= 48 * 3600]) + 1
-        if score >= 7 or _cyc >= 3:
+        if score >= 6 or _cyc >= 3:
             c["hc_score"] = score
             c["cycle_number"] = _cyc
             high_conviction.append(c)
@@ -948,7 +1019,7 @@ def check_post_crash_bounces(
             f"  Current:   {_fmt_price(current)}\n"
             f"  RSI:       {rsi:.1f} (oversold)\n"
             f"  vol/mcap:  {vm:.2f}x (volume dying — stable bottom)\n\n"
-            f"  🎯 TP: +25% | SL: -15% | Max hold: 48h\n"
+            f"  🎯 TP: +10% | SL: -10% | Max hold: 48h\n"
             f"  💬 Whale bounce opportunity — manual entry.\n"
             f"  ⚠️ Max 5% portfolio — high risk."
         )

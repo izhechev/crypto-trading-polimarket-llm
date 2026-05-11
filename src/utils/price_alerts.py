@@ -372,7 +372,20 @@ def check_price_alerts() -> None:
                    f"  ✅ Position closed as WIN.")
             continue
 
-        # Close condition 2: 24h timeout (LOSS unless already hit +10%)
+        # Close condition 2: Hit -10% (LOSS)
+        if pnl_pct <= -10.0:
+            row["status"]     = "LOSS"
+            row["exit_price"] = round(usd, 6)
+            row["close_date"] = _now_str_alert
+            dirty_csv = True
+            side = "SHORT" if is_short else "LONG"
+            print(f"  ❌ STOP LOSS ({side}): {row['coin']} {pnl_pct:+.1f}% within {hours_open_alert:.1f}h")
+            _alert(f"❌ <b>STOP LOSS -10% ({side}) — {row['coin']}</b>\n"
+                   f"  PnL: {pnl_pct:+.1f}% after {hours_open_alert:.1f}h\n"
+                   f"  ❌ Position closed as LOSS.")
+            continue
+
+        # Close condition 3: 24h timeout (LOSS unless already hit +10%)
         if hours_open_alert >= 24.0:
             row["status"]     = "LOSS"
             row["exit_price"] = round(usd, 6)
@@ -385,25 +398,29 @@ def check_price_alerts() -> None:
                    f"  ❌ Position closed as LOSS.")
             continue
 
-            # Approaching TP: pnl >= +8%  (2% before TP of +10%)
-            if pnl_pct >= _TP_ALERT_PNL and "near_tp" not in fired:
-                _alert(
-                    f"⚠️ {coin} at ${usd:.4f} — approaching TP ${tp:.4f} "
-                    f"(PnL {pnl_pct:+.1f}%)"
-                )
-                fired.add("near_tp")
-            elif pnl_pct < _TP_ALERT_PNL and "near_tp" in fired:
-                fired.discard("near_tp")  # reset if price pulled back
+        # ── Alerts for positions that are still OPEN ─────────────────────
+        tp = entry * (0.9 if is_short else 1.1)
+        sl = entry * (1.1 if is_short else 0.9)
 
-            # Approaching SL: pnl <= -8%  (2% before SL of -10%)
-            if pnl_pct <= _SL_ALERT_PNL and "near_sl" not in fired:
-                _alert(
-                    f"⚠️ {coin} at ${usd:.4f} — approaching SL ${sl:.4f} "
-                    f"(PnL {pnl_pct:+.1f}%)"
-                )
-                fired.add("near_sl")
-            elif pnl_pct > _SL_ALERT_PNL and "near_sl" in fired:
-                fired.discard("near_sl")  # reset if price recovered
+        # Approaching TP: pnl >= +8%  (2% before TP of +10%)
+        if pnl_pct >= _TP_ALERT_PNL and "near_tp" not in fired:
+            _alert(
+                f"⚠️ {coin} at ${usd:.4f} — approaching TP ${tp:.4f} "
+                f"(PnL {pnl_pct:+.1f}%)"
+            )
+            fired.add("near_tp")
+        elif pnl_pct < _TP_ALERT_PNL and "near_tp" in fired:
+            fired.discard("near_tp")  # reset if price pulled back
+
+        # Approaching SL: pnl <= -8%  (2% before SL of -10%)
+        if pnl_pct <= _SL_ALERT_PNL and "near_sl" not in fired:
+            _alert(
+                f"⚠️ {coin} at ${usd:.4f} — approaching SL ${sl:.4f} "
+                f"(PnL {pnl_pct:+.1f}%)"
+            )
+            fired.add("near_sl")
+        elif pnl_pct > _SL_ALERT_PNL and "near_sl" in fired:
+            fired.discard("near_sl")  # reset if price recovered
 
     # Always save state first — fired milestone flags must persist even if CSV write fails.
     # Prune state for closed positions (keep it lean)

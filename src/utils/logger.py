@@ -316,13 +316,37 @@ def update_open_positions() -> None:
         row["current_price"] = str(round(usd, 12))
         row["pnl_pct"] = str(round(pnl_pct, 2))
 
+        # ── Fixed Stop Loss Logic ──
+        if row.get("type") == "WHALE_RIDE":
+            try:
+                curr_sl = float(row.get("stop_loss") or 0)
+                
+                # Exit check: Hit Stop Loss
+                if (not is_short and usd <= curr_sl) or (is_short and usd >= curr_sl):
+                    row["status"]     = "LOSS"
+                    row["exit_price"] = str(round(usd, 8))
+                    row["close_date"] = _now_str
+                    _reason = f"Hit Stop Loss ({curr_sl})"
+                    row["reasoning"]  = row.get("reasoning", "") + f" | EXIT: {_reason}"
+                    print(f"  🛑 {row['status']} ({row['coin']}): {pnl_pct:+.1f}% ({_reason})")
+                    try:
+                        from src.utils.telegram import send_telegram as _tg
+                        _tg(f"🛑 <b>Position Closed (LOSS) — {row['coin']}</b>\n"
+                            f"  PnL: {pnl_pct:+.1f}%\n"
+                            f"  Reason: {_reason}")
+                    except Exception: pass
+                    continue
+            except (ValueError, TypeError): pass
+
         try:
             entry_dt = datetime.strptime(row["date"], "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
             hours_open = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
         except Exception: hours_open = 0.0
 
-        # Close condition 1: WIN (+10%)
-        if pnl_pct >= 10.0:
+        # Close condition 1: WIN (Only if not already handled by trail)
+        # Note: In trailing mode, we let it ride past 10% until trail hits.
+        # But if type is SCANNER (not Whale Ride), we keep the old fixed rules.
+        if row.get("type") != "WHALE_RIDE" and pnl_pct >= 10.0:
             row["status"]     = "WIN"
             row["exit_price"] = str(round(usd, 8))
             row["close_date"] = _now_str
@@ -337,8 +361,8 @@ def update_open_positions() -> None:
             except Exception: pass
             continue
 
-        # Close condition 2: Stop Loss (-10%)
-        if pnl_pct <= -10.0:
+        # Close condition 2: Stop Loss (Only for non-Whale Rides)
+        if row.get("type") != "WHALE_RIDE" and pnl_pct <= -10.0:
             row["status"]     = "LOSS"
             row["exit_price"] = str(round(usd, 8))
             row["close_date"] = _now_str
@@ -353,15 +377,14 @@ def update_open_positions() -> None:
 
         # Close condition 3: 24h timeout
         if hours_open >= 24.0:
-            row["status"]     = "LOSS"
+            row["status"]     = "WIN" if pnl_pct > 0 else "LOSS"
             row["exit_price"] = str(round(usd, 8))
             row["close_date"] = _now_str
-            print(f"  ⏰ LOSS (24h timeout): {row['coin']} {pnl_pct:+.1f}%")
+            print(f"  ⏰ {row['status']} (24h timeout): {row['coin']} {pnl_pct:+.1f}%")
             try:
                 from src.utils.telegram import send_telegram as _tg
-                _tg(f"⏰ <b>LOSS (24h Timeout) — {row['coin']}</b>\n"
-                    f"  PnL: {pnl_pct:+.1f}% after {hours_open:.1f}h\n"
-                    f"  ❌ Position closed as LOSS.")
+                _tg(f"⏰ <b>{row['status']} (24h Timeout) — {row['coin']}</b>\n"
+                    f"  PnL: {pnl_pct:+.1f}% after {hours_open:.1f}h\n")
             except Exception: pass
             continue
 
@@ -376,14 +399,15 @@ def log_whale_ride(wr: dict, fear_greed_value: int) -> None:
         return
 
     entry = round(wr.get("entry", 0), 12)
+    sl    = round(entry * 0.90, 12) # Initial fixed -10% Stop Loss
     rows.append({
         "date":          datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "type":          "WHALE_RIDE",
         "coin":          coin,
         "coin_id":       wr.get("coin_id", ""),
         "entry_price":   entry,
-        "stop_loss":     wr.get("stop_loss", ""),
-        "take_profit":   wr.get("take_profit", ""),
+        "stop_loss":     sl,
+        "take_profit":   round(entry * 1.15, 12),
         "status":        "OPEN",
         "current_price": entry,
         "timeframe":     "24h Window",

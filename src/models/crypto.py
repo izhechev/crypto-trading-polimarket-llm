@@ -41,6 +41,7 @@ class TechnicalAnalysis(BaseModel):
     trend: Literal["BULLISH", "BEARISH", "NEUTRAL"]
     recommended_order: Literal["LONG", "SHORT", "SPOT", "NONE"] = "NONE"
     rsi_14: Optional[float] = None
+    atr_pct: Optional[float] = None
     macd_signal: Optional[Literal["BULLISH", "BEARISH", "NEUTRAL"]] = None
     bollinger_position: Optional[Literal["ABOVE_UPPER", "MIDDLE", "BELOW_LOWER"]] = None
     ema_20: Optional[float] = None

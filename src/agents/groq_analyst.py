@@ -855,7 +855,7 @@ Respond in valid JSON only. All values must be strings or numbers — no unquote
             rec["coin"]          = sym
             rec["coin_id"]       = candidate.get("coin_id", "")
             rec["entry_price"]   = price
-            rec["stop_loss"]     = round(price * 0.85, 8)
+            rec["stop_loss"]     = round(price * 0.90, 8)
             rec["take_profit"]   = round(price * 1.10, 8)
             rec["reasoning"]     = f"[WEB RESEARCH: switched from {coin_sym} — {summary}]"
         else:

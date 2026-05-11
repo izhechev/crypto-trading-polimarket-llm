@@ -34,6 +34,14 @@ def _bbands(series: pd.Series, length: int = 20, std: float = 2):
     return pd.DataFrame({"BBL": mid - std * s, "BBM": mid, "BBU": mid + std * s})
 
 
+def _atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    high = df["high"]
+    low = df["low"]
+    close = df["close"].shift(1)
+    tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
+    return tr.rolling(length).mean()
+
+
 def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAnalysis:
     """Compute technical indicators from OHLCV data with Long/Short signals."""
     if len(ohlcv_data) < 20:
@@ -55,6 +63,11 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
     rsi_fn = ta.rsi if HAS_PTA else _rsi
     rsi_series = rsi_fn(df["close"], length=14)
     rsi = float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else None
+
+    # ATR (Average True Range)
+    atr_series = ta.atr(df["high"], df["low"], df["close"], length=14) if HAS_PTA else _atr(df, length=14)
+    atr = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else None
+    atr_pct = (atr / price * 100) if atr and price else None
 
     # MACD
     macd_fn = ta.macd if HAS_PTA else _macd
@@ -226,6 +239,7 @@ def compute_ta(coin_id: str, symbol: str, ohlcv_data: list[dict]) -> TechnicalAn
         trend=trend,
         recommended_order=recommended_order,
         rsi_14=round(rsi, 1) if rsi else None,
+        atr_pct=round(atr_pct, 2) if atr_pct else None,
         macd_signal=macd_signal,
         bollinger_position=bb_position,
         ema_20=round(ema_20_val, 4) if ema_20_val else None,

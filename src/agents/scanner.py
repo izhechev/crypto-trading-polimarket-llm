@@ -18,6 +18,14 @@ from src.connectors.coinpaprika import (
 from src.agents.technical_analyst import compute_ta
 
 
+def _pfmt(p: float) -> str:
+    """Format a price with enough decimal places."""
+    if p >= 1:       return f"${p:,.4f}"
+    if p >= 0.01:    return f"${p:.5f}"
+    if p >= 0.0001:  return f"${p:.7f}"
+    return f"${p:.10f}"
+
+
 def fetch_ohlcv(coin_id: str, days: int = 30) -> list[dict]:
     """Backwards-compat shim used by callers outside scanner.py."""
     return _cg_fetch_ohlcv(coin_id, days)
@@ -1030,7 +1038,7 @@ def _build_approaching_tp_set(current_prices: dict[str, float], threshold_pct: f
 PUMP_WATCHLIST_PATH = config.DATA_DIR / "pump_watchlist.json"
 # Position sizing for auto whale ride entries
 WHALE_RIDE_MAX_USD       = 18.0   # max $ per position (portfolio / 5)
-WHALE_CRASH_TRIGGER      = 0.60   # >60% crash from peak → standard whale ride (TP +100%, SL -15%)
+WHALE_CRASH_TRIGGER      = 0.60   # >60% crash from peak → standard whale ride (TP +100%, SL -10%)
 WHALE_CRASH_RISKY_MIN    = 0.40   # 40-60% crash → risky ride (TP +50%, SL -10%)
 WHALE_CRASH_RISKY_MAX    = 0.60
 WHALE_RISKY_MAX_MCAP_USD = 50_000_000   # only for coins < $50M mcap (high volatility tier)
@@ -1200,7 +1208,7 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
         mcap = coin.get("market_cap") or 0
 
         if abs_drop >= WHALE_CRASH_TRIGGER:
-            # Standard whale ride: >60% crash, TP +100%, SL -15%
+            # Standard whale ride: >60% crash, TP +100%, SL -10%
             prev_trades = _get_previous_closed_trades(sym)
             prev_wins   = [t for t in prev_trades if t.get("status") == "WIN"]
             known_cycles = [f"{float(t['pnl_pct']):+.0f}%" for t in prev_wins if t.get("pnl_pct")]
@@ -1210,10 +1218,10 @@ def _check_watchlist_crashes(all_coins: list[dict]) -> list[dict]:
                 "coin_id":        coin.get("id", ""),
                 "price":          current,
                 "entry":          current,
-                "stop_loss":      round(current * 0.85, 8),   # -15% pre-milestone
-                "take_profit":    round(current * 2.00, 8),   # +100%
+                "stop_loss":      round(current * 0.90, 8),   # -10% tight SL
+                "take_profit":    round(current * 1.10, 8),   # +10% TP
                 "crash_reason":   f"pump {entry.get('peak_7d', 0):+.0f}% → crash {abs_drop*100:.0f}% from peak",
-                "max_hold_hours": 48,
+                "max_hold_hours": 24,
                 "is_serial_scam": False,
                 "allies":         [],
                 "known_cycles":   known_cycles,
@@ -1273,7 +1281,7 @@ def _build_whale_ride(coin: dict, crash_reason: str, prev_trades: list[dict]) ->
     price    = coin.get("current_price", 0)
     # max_hold: 48h default; crash_reason may contain "ACTIVE_SCAM" or "MANIPULATED_REAL"
     is_scam  = any(kw in crash_reason.upper() for kw in ("SCAM", "SERIAL", "MANIPULATION"))
-    max_hold = 24 if is_scam else 48
+    max_hold = 24
 
     prev_wins = [t for t in prev_trades if t.get("status") == "WIN"]
     cycle_num = len(prev_trades) + 1  # this would be cycle N+1
@@ -1293,7 +1301,7 @@ def _build_whale_ride(coin: dict, crash_reason: str, prev_trades: list[dict]) ->
         "coin_id":        coin.get("id", ""),
         "price":          price,
         "entry":          price,
-        "stop_loss":      round(price * 0.85, 8),
+        "stop_loss":      round(price * 0.90, 8),
         "take_profit":    round(price * 1.50, 8),
         "crash_reason":   crash_reason,
         "max_hold_hours": max_hold,
@@ -1384,7 +1392,7 @@ def run_smart_scanner(
     exchange: str | None = None,
     fear_greed: dict | None = None,
     open_count: int = 0,
-) -> tuple[list[dict], list[dict], list[dict], int, dict]:
+) -> tuple[list[dict], list[dict], list[dict], int, dict, dict]:
     """
     Fetch top coins, exclude stablecoins/wrapped tokens, optionally filter
     by exchange, score by TA opportunity.
@@ -2052,6 +2060,7 @@ def run_smart_scanner(
     # Remove coins approaching their TP (within 3% away) — they're about to close WIN,
     # no new entry needed; display them as a note instead.
     current_prices = {r["symbol"].upper(): r.get("price", 0.0) for r in normal_results}
+    open_positions = _get_open_positions(current_prices)
     approaching_tp = _build_approaching_tp_set(current_prices, threshold_pct=3.0)
     if approaching_tp:
         for sym, pct in approaching_tp.items():
@@ -2193,7 +2202,7 @@ def run_smart_scanner(
                 print(f"     Reason: {wr['crash_reason']}")
             else:
                 print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p)}  (crashed {abs(drop):.0f}% from pump peak)")
-                print(f"     Entry: {_pfmt(p)} | SL: {_pfmt(sl)} (-15% pre-milestone) | TP: {_pfmt(tp)} (+100%)")
+                print(f"     Entry: {_pfmt(p)} | SL: {_pfmt(sl)} (-10%) | TP: {_pfmt(tp)} (+100%)")
                 print(f"     Max hold: 48h | Max position: ${WHALE_RIDE_MAX_USD:.0f}")
                 print(f"     Pattern: {cycles_str}")
                 print(f"     Reason: {wr['crash_reason']}")
@@ -2232,7 +2241,7 @@ def run_smart_scanner(
             print(f"     24h: {ch24_wr:+.1f}%  |  7d: {ch7d_wr:+.1f}%")
             print(f"     Crash: {crash}")
             print(f"     Pattern: {cycles_str}")
-            print(f"     Entry: {_pfmt(price)} | SL: {_pfmt(sl)} (-15%) | TP: {_pfmt(tp)} (+50%)")
+            print(f"     Entry: {_pfmt(price)} | SL: {_pfmt(sl)} (-10%) | TP: {_pfmt(tp)} (+50%)")
             print(f"     Max hold: {hold}h | Cycle #{cyc_num}{ally_str}")
             print(f"     ⚠️ EXTREME RISK — manipulated token, max 5% of portfolio")
 
