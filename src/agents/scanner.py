@@ -1432,15 +1432,15 @@ def run_smart_scanner(
         if allowed is not None:
             print(f"  {len(allowed)} unique base assets on {label}")
 
-    # 1b. Fetch CMC trending symbols for bonus scoring (optional, no-op if key missing)
-    trending_symbols: set[str] = set()
-    try:
-        from src.connectors.coinmarketcap import fetch_trending as _cmc_trending
-        trending_symbols = set(_cmc_trending())
-        if trending_symbols:
-            print(f"  CMC trending: {', '.join(sorted(trending_symbols))}")
-    except Exception:
-        pass
+    # 1c. Determine Market Regime (BTC/ETH performance)
+    btc_ch24 = next((c.get("price_change_percentage_24h", 0) for c in coins if c.get("symbol") == "BTC"), 0)
+    eth_ch24 = next((c.get("price_change_percentage_24h", 0) for c in coins if c.get("symbol") == "ETH"), 0)
+    
+    is_risk_off = (btc_ch24 < -3.0 and eth_ch24 < -3.0)
+    if is_risk_off:
+        print(f"  ⚠️  MARKET REGIME: RISK-OFF (BTC {btc_ch24:+.1f}%, ETH {eth_ch24:+.1f}%) — tightening entry requirements")
+    else:
+        print(f"  ✅ MARKET REGIME: STABLE/BULLISH")
 
     # 2. Top coins market data — CoinPaprika (primary, single free request), CoinGecko fallback
     _cp_ok = False
@@ -2075,6 +2075,7 @@ def run_smart_scanner(
     from src.connectors.dexscreener import fetch_dex_liquidity
     from src.connectors.coingecko import fetch_platform_info
     
+    filtered_results = []
     for r in normal_results[:30]:
         try:
             cid = r.get("id") or r.get("coin_id")
@@ -2086,17 +2087,25 @@ def run_smart_scanner(
                 liq = fetch_dex_liquidity(r["symbol"])
             
             r["liquidity_usd"] = liq
-            if liq > 0:
+            
+            # Hard exclusion gate: skip coins with less than $50k liquidity
+            if liq > 0 and liq < 50_000:
+                print(f"  🚫 SKIP {r['symbol']}: Liquidity too low (${liq/1e3:.0f}k)")
+                continue
+                
+            if liq >= 50_000:
                 if liq < 100_000:
                     r["score"] -= 2
                     r["reasons"].append(f"Low liquidity (${liq/1e3:.0f}k)")
                 elif liq > 1_000_000:
                     r["score"] += 1
                     r["reasons"].append(f"Deep liquidity (${liq/1e6:.1f}M)")
-        except Exception: pass
-
-    # Re-sort and filter after on-chain checks
-    normal_results.sort(key=lambda x: (x["score"], x.get("change_24h", 0)), reverse=True)
+            filtered_results.append(r)
+        except Exception:
+            filtered_results.append(r) # Keep if liquidity check fails
+            
+    # Include the rest of the results that weren't checked for liquidity
+    final_results = filtered_results + normal_results[30:]
     
     # ── Most Valuable Only ──
     # Show Top Long/Short/Spot picks that meet 100% confidence technical score thresholds
