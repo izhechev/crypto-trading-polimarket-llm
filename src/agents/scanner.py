@@ -1727,43 +1727,10 @@ def run_smart_scanner(
         score = 50
         reasons = []
 
-        # News Analyst & Fetching
-        from src.agents.news_analyst.analyst import NewsAnalyst
-        analyst = NewsAnalyst()
-        from src.connectors.web_research import fetch_news_for_coins
-        
-        # 1. Fetch & Analyze (Singular call)
-        news_items = fetch_news_for_coins([coin], limit_per_coin=5).get(symbol, [])
-        news_data = analyst.analyze_news(symbol, news_items)
-        
-        # 2. Robust parsing: handles list or unexpected types by defaulting to neutral
-        if isinstance(news_data, list):
-            news_data = news_data[0] if (news_data and isinstance(news_data[0], dict)) else {}
-        if not isinstance(news_data, dict):
-            news_data = {}
-            
-        news_verdict = news_data.get("verdict", "neutral")
-        news_summary = news_data.get("summary", "No summary")
-        news_score_val = news_data.get("score", 0)
-            
-        print(f"  {symbol} (Score: {news_score_val}) - fetched news: {news_summary}", flush=True)
-        
-        # 3. Catalyst scoring logic
-        # 0: Negative, 1-3: Noise, 4-7: Moderate, 8-10: Major Catalyst
-        news_score_val = news_data.get("score", 5) # Default to 5 (neutral) if missing
-        
-        if news_score_val >= 8:
-            score += 20
-            reasons.append(f"Major Catalyst (Score {news_score_val}) (+20)")
-        elif news_score_val == 0:
-            score -= 30
-            reasons.append(f"Major Negative News (Score {news_score_val}) (-30)")
-        elif 1 <= news_score_val <= 3:
-            reasons.append("News: Speculative/Noise sentiment (+0)")
-        elif 4 <= news_score_val <= 7:
-            score += 5
-            reasons.append(f"News: Moderate development (Score {news_score_val}) (+5)")
-        
+        # ── Conservative Engine Scoring (Base: 50) ──
+        score = 50
+        reasons = []
+        # [NEWS BYPASSED FOR DEBUGGING]
         # Trend Alignment — Max +15
         if coin.get("price_change_percentage_7d_in_currency", 0) > 0:
             score += 15
@@ -2193,6 +2160,20 @@ def run_smart_scanner(
     # Include the rest of the results that weren't checked for liquidity
     final_results = filtered_results + normal_results[30:]
     
+    # ── WATCHLIST (Scores 50-84) ──
+    # Show Top 10 coins that are good but didn't reach 85+ conviction.
+    watchlist_candidates = [r for r in normal_results if 50 <= r.get("score", 0) < 85]
+    watchlist_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+    top_watchlist = watchlist_candidates[:10]
+
+    if top_watchlist:
+        print(f"\n  👀  WATCHLIST (Scores 50-84 — Not Actionable)")
+        print("-" * 30)
+        for rank, r in enumerate(top_watchlist, 1):
+            _print_pick(rank, r, _catalysts, label="[WATCHLIST] ")
+    else:
+        print("\n  👀  WATCHLIST: none found")
+
     # ── Most Valuable Only ──
     # Show Top Long/Short/Spot picks that meet 85+ confidence technical score thresholds
     top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG" and r.get("score", 0) >= 85]
@@ -2311,8 +2292,8 @@ def run_smart_scanner(
             print(f"  ✗  {sym:10s}  —  {reason}")
 
     # ── Regular whale ride candidates (from risk assessor) ─────────────
+    print(f"\n  🐋  WHALE RIDE CANDIDATES\n" + "-" * 60)
     if whale_rides:
-        print(f"\n  🐋  WHALE RIDE CANDIDATES\n" + "-" * 60)
         for wr in whale_rides:
             sym        = wr["symbol"]
             price      = wr["price"]
@@ -2336,6 +2317,8 @@ def run_smart_scanner(
             print(f"     Entry: {_pfmt(price)} | SL: {_pfmt(sl)} (-10%) | TP: {_pfmt(tp)} (+50%)")
             print(f"     Max hold: {hold}h | Cycle #{cyc_num}{ally_str}")
             print(f"     ⚠️ EXTREME RISK — manipulated token, max 5% of portfolio")
+    else:
+        print("  🐋  WHALE RIDE CANDIDATES: none found")
 
     # ── Whale Rider — volume anomaly detection (Telegram alert, no auto-trade) ──
     try:
