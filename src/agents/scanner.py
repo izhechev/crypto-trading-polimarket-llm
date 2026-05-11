@@ -1753,21 +1753,21 @@ def run_smart_scanner(
         from src.connectors.web_research import fetch_news_for_coins
         
         # 1. Fetch & Analyze
-        news_items = fetch_news_for_coins([coin], limit_per_coin=3).get(symbol, [])
+        news_items = fetch_news_for_coins([coin], limit_per_coin=5).get(symbol, [])
         news_data = analyst.analyze_news(symbol, news_items)
         
         # 2. Robust parsing
-        if isinstance(news_data, dict):
-            news_verdict = news_data.get("verdict", "neutral")
-            news_summary = news_data.get("summary", "No summary")
-            news_score_val = news_data.get("score", 0)
-        else:
-            news_verdict = "neutral"
-            news_summary = "Analysis failed"
-            news_score_val = 0
+        if isinstance(news_data, list):
+            news_data = news_data[0] if (news_data and isinstance(news_data[0], dict)) else {}
+        if not isinstance(news_data, dict):
+            news_data = {}
+            
+        news_verdict = news_data.get("verdict", "neutral")
+        news_summary = news_data.get("summary", "No summary")
+        news_score_val = news_data.get("score", 0)
             
         print(f"  {symbol} (Score: {news_score_val}) - fetched news: {news_summary}", flush=True)
-        time.sleep(1.0) # Rate limit respect
+        # Removed time.sleep(1.0) to allow faster processing; tenacity retries/Gemini fallback will handle limits.
         
         # 3. Catalyst scoring logic
         is_hard_catalyst = any(c in str(news_data.get("catalyst_type", "")).lower() for c in 
