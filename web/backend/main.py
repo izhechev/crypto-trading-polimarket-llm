@@ -42,29 +42,97 @@ scan_state = {
 }
 
 # Real-time Price Cache
-# symbol -> usd_price
 realtime_prices = {}
-# coin_id -> logo_url
+# Persistent Logo Cache
+LOGO_CACHE_PATH = PROJECT_ROOT / "data" / "logo_cache.json"
 logo_cache = {}
 
+def load_logo_cache():
+    global logo_cache
+    if LOGO_CACHE_PATH.exists():
+        try:
+            with open(LOGO_CACHE_PATH, 'r') as f:
+                logo_cache = json.load(f)
+        except Exception:
+            logo_cache = {}
+
+def save_logo_cache():
+    try:
+        with open(LOGO_CACHE_PATH, 'w') as f:
+            json.dump(logo_cache, f)
+    except Exception:
+        pass
+
+load_logo_cache()
+
 def price_poller_task():
-    """Background task to fetch prices from Binance every second."""
+    """Background task to fetch prices from Binance and logos from CoinGecko."""
     print("Starting real-time price poller...")
     exchange = ccxt.binance({'enableRateLimit': True})
+    
+    # Initial market load
+    active_symbols = set()
+    try:
+        markets = exchange.load_markets()
+        active_symbols = {
+            s for s, m in markets.items() 
+            if m.get('active') and m.get('info', {}).get('status') == 'TRADING'
+        }
+        print(f"Tracking {len(active_symbols)} active Binance markets.")
+    except Exception as e:
+        print(f"Initial market load error: {e}")
+
+    last_logo_fetch = 0
+    
     while True:
+        # 1. Fetch Prices (every 1s)
         try:
-            # Fetch all USDT tickers at once - very efficient
             tickers = exchange.fetch_tickers()
+            new_prices = {}
             for pair, data in tickers.items():
+                if pair not in active_symbols: continue
+                base = pair.split('/')[0]
                 if pair.endswith('/USDT'):
-                    symbol = pair.split('/')[0]
-                    realtime_prices[symbol] = data['last']
+                    new_prices[base] = data['last']
                 elif pair.endswith('/USDC'):
-                    symbol = pair.split('/')[0]
-                    if symbol not in realtime_prices:
-                        realtime_prices[symbol] = data['last']
+                    if base not in new_prices: new_prices[base] = data['last']
+            realtime_prices.update(new_prices)
         except Exception as e:
             print(f"Price poller error: {e}")
+
+        # 2. Fetch Logos (every 10 minutes or if cache is empty)
+        if time.time() - last_logo_fetch > 600:
+            try:
+                # Find all coin_ids that need logos
+                needs_logo = set()
+                # From Recs
+                rec_path = config.DATA_DIR / "recommendations.csv"
+                if rec_path.exists():
+                    with open(rec_path, mode='r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            cid = row.get("coin_id")
+                            if cid and cid not in logo_cache: needs_logo.add(cid)
+                # From Portfolio
+                try:
+                    holdings, _ = fetch_kraken_portfolio()
+                    for h in holdings:
+                        cid = h.get("coin_id")
+                        if cid and cid not in logo_cache: needs_logo.add(cid)
+                except Exception: pass
+
+                if needs_logo:
+                    print(f"Fetching logos for: {needs_logo}")
+                    prices = fetch_prices(list(needs_logo))
+                    if prices:
+                        for p in prices:
+                            logo_cache[p.coin_id] = p.image_url
+                        save_logo_cache()
+                
+                last_logo_fetch = time.time()
+            except Exception as e:
+                print(f"Logo fetcher error: {e}")
+
         time.sleep(1)
 
 # Start poller in a daemon thread
@@ -79,7 +147,7 @@ class Position(BaseModel):
     entry_price: float
     current_price: float
     pnl_pct: float
-    type: str  # "SCANNER" or "PORTFOLIO"
+    type: str 
     status: str
     logo_url: Optional[str] = None
     stop_loss: Optional[float] = None
@@ -99,11 +167,10 @@ class PositionsResponse(BaseModel):
 
 @app.get("/api/positions", response_model=PositionsResponse)
 async def get_positions():
-    print(f"[{datetime.now()}] GET /api/positions")
     positions = []
     fixed_allocation_eur = 100.0
     
-    # 1. Load data sources
+    # 1. Load data
     rec_path = config.DATA_DIR / "recommendations.csv"
     open_recs = []
     if rec_path.exists():
@@ -115,62 +182,29 @@ async def get_positions():
     
     try:
         holdings, _ = fetch_kraken_portfolio()
-    except Exception as e:
-        print(f"Kraken error: {e}")
+    except Exception:
         if config.PORTFOLIO_PATH.exists():
             with open(config.PORTFOLIO_PATH, 'r') as f:
                 holdings = json.load(f).get("holdings", [])
         else:
             holdings = []
 
-    # 2. Collect unique IDs for logo fetching (only if not cached)
-    needs_logo = set()
-    for rec in open_recs:
-        cid = rec.get("coin_id")
-        if cid and cid not in logo_cache: needs_logo.add(cid)
-    for h in holdings:
-        cid = h.get("coin_id")
-        if cid and cid not in logo_cache: needs_logo.add(cid)
-    
-    if needs_logo:
-        try:
-            print(f"Fetching logos for: {needs_logo}")
-            prices = fetch_prices(list(needs_logo))
-            for p in prices:
-                logo_cache[p.coin_id] = p.image_url
-                # Map coin_id -> symbol for better Binance lookup
-                # Some coins have different symbols on CG vs Binance
-                if p.coin_id and p.symbol:
-                    # e.g. "snt-status" -> "SNT"
-                    pass 
-                if p.symbol not in realtime_prices:
-                    realtime_prices[p.symbol] = p.price_usd
-        except Exception as e:
-            print(f"Logo fetch error: {e}")
-
     total_current_value_eur = 0.0
     total_investment_eur = 0.0
 
-    # 3. Process positions with real-time prices
+    # 2. Map
     for rec in open_recs:
         cid = rec.get("coin_id")
         symbol = (rec.get("coin") or cid or "?").upper()
         
         entry = float(rec.get("entry_price") or 0)
-        # Try exact symbol, then common variations
-        curr = realtime_prices.get(symbol)
-        if curr is None:
-            curr = float(rec.get("current_price") or entry)
+        curr = realtime_prices.get(symbol, float(rec.get("current_price") or entry))
         
         pnl = ((curr - entry) / entry * 100) if entry > 0 else 0
-        
-        # Suspicious data check (e.g. 10x in a day might be wrong entry)
         reasoning = rec.get("reasoning")
-        if pnl > 500: # Flag extremely high PnL as potentially stale entry
-            reasoning = f"[⚠️ Stale Entry?] {reasoning}"
+        if pnl > 500: reasoning = f"[⚠️ Stale Entry?] {reasoning}"
 
-        curr_val_eur = fixed_allocation_eur * (1 + pnl/100)
-        total_current_value_eur += curr_val_eur
+        total_current_value_eur += fixed_allocation_eur * (1 + pnl/100)
         total_investment_eur += fixed_allocation_eur
 
         positions.append(Position(
@@ -193,7 +227,6 @@ async def get_positions():
     for h in holdings:
         cid = h.get("coin_id")
         symbol = (h.get("asset") or cid or "?").upper()
-        
         existing = next((pos for pos in positions if cid and pos.coin_id == cid), None)
         
         amt = float(h.get("amount") or 0)
@@ -206,12 +239,10 @@ async def get_positions():
             existing.type = "PORTFOLIO"
         else:
             if amt > 0:
-                curr_val_eur = amt * curr * 0.92 
-                total_current_value_eur += curr_val_eur
-                total_investment_eur += (amt * entry * 0.92)
+                total_current_value_eur += amt * curr * 0.92
+                total_investment_eur += amt * entry * 0.92
             else:
-                curr_val_eur = fixed_allocation_eur * (1 + pnl/100)
-                total_current_value_eur += curr_val_eur
+                total_current_value_eur += fixed_allocation_eur * (1 + pnl/100)
                 total_investment_eur += fixed_allocation_eur
 
             positions.append(Position(
@@ -228,7 +259,6 @@ async def get_positions():
             ))
 
     total_pnl_pct = ((total_current_value_eur - total_investment_eur) / total_investment_eur * 100) if total_investment_eur > 0 else 0
-    print(f"Response: {len(positions)} pos, Net Worth: {total_current_value_eur:.2f} EUR")
 
     return PositionsResponse(
         positions=positions,
@@ -242,6 +272,7 @@ async def get_scan_status():
 
 def run_scan_task():
     global scan_state
+    print(f"[{datetime.now()}] Background scan task started.")
     scan_state["is_running"] = True
     scan_state["last_output"] = "Scan started...\n"
     
@@ -264,14 +295,18 @@ def run_scan_task():
             
         process.wait()
         scan_state["last_scan_ts"] = datetime.now()
+        print(f"[{datetime.now()}] Background scan task completed. Exit code: {process.returncode}")
     except Exception as e:
+        print(f"[{datetime.now()}] Background scan task failed: {e}")
         scan_state["last_output"] += f"\nERROR: {e}"
     finally:
         scan_state["is_running"] = False
 
 @app.post("/api/scan")
 async def start_scan(background_tasks: BackgroundTasks):
+    print(f"[{datetime.now()}] POST /api/scan")
     if scan_state["is_running"]:
+        print("Scan already in progress.")
         raise HTTPException(status_code=400, detail="Scan already in progress")
     
     background_tasks.add_task(run_scan_task)
