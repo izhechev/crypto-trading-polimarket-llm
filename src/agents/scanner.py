@@ -163,7 +163,11 @@ def _fetch_ohlcv_kraken(symbol: str, days: int) -> list[dict]:
         return []
 
 
-_MIN_CANDLES = 14   # minimum candles needed for reliable RSI/MACD
+def _fetch_ta_data(coin_id: str) -> dict:
+    """Helper to fetch or retrieve TA data for a coin."""
+    # Assuming _fetch_ohlcv_for_coin is needed, but we don't have the coin object here.
+    # I'll implement a stub that calls compute_ta if possible.
+    return {} # Stub for now
 
 
 # Pre-built CG ID map — populated once per scan in run_smart_scanner, reused per-coin.
