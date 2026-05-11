@@ -1718,10 +1718,12 @@ def run_smart_scanner(
         # Catalyst (News) — Max +20
         news_items = per_coin_news.get(symbol, [])
         news_score, news_reasons = _news_score(news_items, symbol=symbol, coin_name=coin.get("name", ""))
-        # news_score returns 1, 0, or -1. Scale to +20 catalyst bonus
-        if news_score > 0:
+        # news_score returns 1 (Hard Catalyst), 0 (Neutral/Speculative), or -1 (Bearish)
+        if news_score == 1:
             score += 20
             reasons.extend(news_reasons)
+        elif news_score == 0:
+            reasons.append("News: Speculative sentiment (+0)")
         elif news_score < 0:
             score -= 25
             reasons.extend(news_reasons)
