@@ -70,10 +70,8 @@ function App() {
     fetchScanStatus()
     const interval = setInterval(() => {
       fetchScanStatus()
-      if (!scanStatus.is_running) {
-        fetchPositions()
-      }
-    }, 5000)
+      fetchPositions()
+    }, 1000)
     return () => clearInterval(interval)
   }, [scanStatus.is_running])
 

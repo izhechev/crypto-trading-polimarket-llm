@@ -3,6 +3,7 @@ import subprocess
 import threading
 import json
 import csv
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import sys
+import ccxt
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -23,7 +25,7 @@ from src.connectors.kraken import fetch_kraken_portfolio
 
 app = FastAPI(title="CryptoAdvisor API")
 
-# Enable CORS for frontend development
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,12 +34,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global state for scan
+# Global State
 scan_state = {
     "is_running": False,
     "last_output": "",
     "last_scan_ts": None,
 }
+
+# Real-time Price Cache
+# symbol -> usd_price
+realtime_prices = {}
+# coin_id -> logo_url
+logo_cache = {}
+
+def price_poller_task():
+    """Background task to fetch prices from Binance every second."""
+    print("Starting real-time price poller...")
+    exchange = ccxt.binance({'enableRateLimit': True})
+    while True:
+        try:
+            # Fetch all USDT tickers at once - very efficient
+            tickers = exchange.fetch_tickers()
+            for pair, data in tickers.items():
+                if pair.endswith('/USDT'):
+                    symbol = pair.split('/')[0]
+                    realtime_prices[symbol] = data['last']
+                elif pair.endswith('/USDC'):
+                    symbol = pair.split('/')[0]
+                    if symbol not in realtime_prices:
+                        realtime_prices[symbol] = data['last']
+        except Exception as e:
+            print(f"Price poller error: {e}")
+        time.sleep(1)
+
+# Start poller in a daemon thread
+poller_thread = threading.Thread(target=price_poller_task, daemon=True)
+poller_thread.start()
 
 class Position(BaseModel):
     coin: str
@@ -68,9 +100,9 @@ class PositionsResponse(BaseModel):
 @app.get("/api/positions", response_model=PositionsResponse)
 async def get_positions():
     positions = []
-    fixed_allocation_eur = 100.0 # Default as requested
+    fixed_allocation_eur = 100.0
     
-    # 1. Load from recommendations.csv (OPEN positions)
+    # 1. Load data sources
     rec_path = config.DATA_DIR / "recommendations.csv"
     open_recs = []
     if rec_path.exists():
@@ -80,7 +112,6 @@ async def get_positions():
                 if row.get("status") == "OPEN":
                     open_recs.append(row)
     
-    # 2. Load from portfolio.json or Kraken
     try:
         holdings, _ = fetch_kraken_portfolio()
     except Exception:
@@ -90,48 +121,47 @@ async def get_positions():
         else:
             holdings = []
 
-    # Collect all unique coin_ids to fetch live prices/logos
-    coin_ids = set()
+    # 2. Collect unique IDs for logo fetching (only if not cached)
+    needs_logo = set()
     for rec in open_recs:
-        if rec.get("coin_id"):
-            coin_ids.add(rec["coin_id"])
+        cid = rec.get("coin_id")
+        if cid and cid not in logo_cache: needs_logo.add(cid)
     for h in holdings:
-        if h.get("coin_id"):
-            coin_ids.add(h["coin_id"])
+        cid = h.get("coin_id")
+        if cid and cid not in logo_cache: needs_logo.add(cid)
     
-    # Fetch live prices and logos
-    price_map = {}
-    if coin_ids:
+    if needs_logo:
         try:
-            prices = fetch_prices(list(coin_ids))
-            price_map = {p.coin_id: p for p in prices}
-        except Exception as e:
-            print(f"Error fetching prices: {e}")
+            # We use CoinGecko just for logos once in a while
+            prices = fetch_prices(list(needs_logo))
+            for p in prices:
+                logo_cache[p.coin_id] = p.image_url
+                # Also fallback price if Binance doesn't have it
+                if p.symbol not in realtime_prices:
+                    realtime_prices[p.symbol] = p.price_usd
+        except Exception:
+            pass
 
     total_current_value_eur = 0.0
     total_investment_eur = 0.0
 
-    # Process open recommendations
+    # 3. Process positions with real-time prices
     for rec in open_recs:
         cid = rec.get("coin_id")
-        p = price_map.get(cid) if cid else None
-        
-        coin_name = rec.get("coin") or cid or "Unknown"
-        symbol = p.symbol if p else (rec.get("coin") or cid or "?").upper()
+        symbol = (rec.get("coin") or cid or "?").upper()
         
         entry = float(rec.get("entry_price") or 0)
-        curr = p.price_usd if p else float(rec.get("current_price") or entry)
-        pnl = ((curr - entry) / entry * 100) if entry > 0 else 0
+        # Use Binance real-time price, fallback to rec current_price or entry
+        curr = realtime_prices.get(symbol, float(rec.get("current_price") or entry))
         
-        # Calculate EUR value (assuming 100 EUR entry)
-        # Using a simplified 1:1 USD/EUR if eur price not available for pnl, 
-        # but let's use fixed_allocation_eur * (1 + pnl/100)
+        pnl = ((curr - entry) / entry * 100) if entry > 0 else 0
         curr_val_eur = fixed_allocation_eur * (1 + pnl/100)
+        
         total_current_value_eur += curr_val_eur
         total_investment_eur += fixed_allocation_eur
 
         positions.append(Position(
-            coin=coin_name,
+            coin=rec.get("coin") or cid or "Unknown",
             symbol=symbol,
             coin_id=cid,
             amount=0, 
@@ -140,47 +170,39 @@ async def get_positions():
             pnl_pct=pnl,
             type=rec.get("type") or "SCANNER",
             status="OPEN",
-            logo_url=p.image_url if p else None,
+            logo_url=logo_cache.get(cid),
             stop_loss=float(rec.get("stop_loss")) if rec.get("stop_loss") else None,
             take_profit=float(rec.get("take_profit")) if rec.get("take_profit") else None,
             reasoning=rec.get("reasoning"),
             date=rec.get("date")
         ))
 
-    # Process manual holdings
     for h in holdings:
         cid = h.get("coin_id")
-        p = price_map.get(cid) if cid else None
+        symbol = (h.get("asset") or cid or "?").upper()
         
-        # Avoid duplicates if already in recs
         existing = next((pos for pos in positions if cid and pos.coin_id == cid), None)
         
         amt = float(h.get("amount") or 0)
         entry = float(h.get("entry_price_usd") or 0)
-        curr = p.price_usd if p else entry
+        curr = realtime_prices.get(symbol, entry)
         pnl = ((curr - entry) / entry * 100) if entry > 0 else 0
         
         if existing:
             existing.amount = amt
             existing.type = "PORTFOLIO"
         else:
-            # For manual holdings, we use the actual amount if available, 
-            # otherwise assume fixed allocation
             if amt > 0:
-                # Value in EUR
-                curr_eur = p.price_eur if p else (curr * 0.92) # Fallback rate
-                curr_val_eur = amt * curr_eur
+                curr_val_eur = amt * curr * 0.92 # Approx conversion
                 total_current_value_eur += curr_val_eur
-                total_investment_eur += (amt * (entry * 0.92))
+                total_investment_eur += (amt * entry * 0.92)
             else:
                 curr_val_eur = fixed_allocation_eur * (1 + pnl/100)
                 total_current_value_eur += curr_val_eur
                 total_investment_eur += fixed_allocation_eur
 
-            asset_name = h.get("asset") or cid or "Unknown"
-            symbol = p.symbol if p else (h.get("asset") or cid or "?").upper()
             positions.append(Position(
-                coin=asset_name,
+                coin=h.get("asset") or cid or "Unknown",
                 symbol=symbol,
                 coin_id=cid,
                 amount=amt,
@@ -189,7 +211,7 @@ async def get_positions():
                 pnl_pct=pnl,
                 type="PORTFOLIO",
                 status="OPEN",
-                logo_url=p.image_url if p else None,
+                logo_url=logo_cache.get(cid),
             ))
 
     total_pnl_pct = ((total_current_value_eur - total_investment_eur) / total_investment_eur * 100) if total_investment_eur > 0 else 0
@@ -211,8 +233,6 @@ def run_scan_task():
     
     cmd = [sys.executable, str(PROJECT_ROOT / "run.py"), "--scan"]
     try:
-        # We use Popen to potentially stream output later, 
-        # but for now let's just capture the whole thing.
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -226,7 +246,7 @@ def run_scan_task():
         output = ""
         for line in iter(process.stdout.readline, ""):
             output += line
-            scan_state["last_output"] = output # Update live-ish
+            scan_state["last_output"] = output
             
         process.wait()
         scan_state["last_scan_ts"] = datetime.now()
