@@ -22,7 +22,7 @@ class LLMClient:
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=config.GEMINI_API_KEY)
-                self.gemini_model = genai.GenerativeModel('gemini-3.1-pro-preview')
+                self.gemini_model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
             except Exception as e:
                 logger.error(f"Gemini init failed: {e}")
 
