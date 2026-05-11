@@ -359,13 +359,14 @@ def assess_coin_risks(
     all_flagged_syms = set(flagged_onchain) | set(flagged_news)
     if all_flagged_syms:
         try:
-            from groq import Groq
-            client = Groq(api_key=config.GROQ_API_KEY)
+            from src.utils.llm_client import LLMClient
+            llm = LLMClient()
             batch = [
                 (sym, flagged_onchain.get(sym, []), flagged_news.get(sym, []))
                 for sym in all_flagged_syms
             ]
-            verdicts = _groq_verdict(batch, client)
+            prompt = f"Analyze coins for scam risk: {json.dumps(batch)}"
+            verdicts = llm.call(prompt, system_prompt="You are a risk assessor. Return a JSON dict where keys are symbols and values are {'verdict': '...', 'reasoning': '...'}.")
         except Exception as e:
             # print(f"  [risk] Groq unavailable: {e}")
             pass

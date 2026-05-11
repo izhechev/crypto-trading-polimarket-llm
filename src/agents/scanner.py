@@ -3,8 +3,13 @@ import json
 import re
 import time
 import httpx
+import logging
 import sys
 from pathlib import Path
+
+# Silence HTTP request logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import config
@@ -1721,6 +1726,39 @@ def run_smart_scanner(
         # ── Conservative Engine Scoring (Base: 50) ──
         score = 50
         reasons = []
+
+        # Initialize news analyst
+        from src.agents.news_analyst.analyst import NewsAnalyst
+        analyst = NewsAnalyst()
+
+        from src.connectors.web_research import fetch_news_for_coins
+        news_items = fetch_news_for_coins([coin], limit_per_coin=3).get(symbol, [])
+        news_data = analyst.analyze_news(symbol, news_items)
+        
+        # news_score logic (1, 0, -1)
+        news_verdict = news_data.get("verdict", "neutral")
+        news_score = 1 if news_verdict == "bullish" else (-1 if news_verdict == "bearish" else 0)
+        
+        print(f"  {symbol} - fetched news: {news_data.get('summary', 'No summary')}", flush=True)
+        
+        # Hard catalysts (partnerships, mainnet, listing, funding, ETF, launch, major upgrade)
+        # Verify the catalyst type is concrete
+        is_hard_catalyst = any(c in news_data.get("catalyst_type", "").lower() for c in 
+                               ["partnership", "mainnet", "listing", "funding", "etf", "launch", "upgrade", "buyback"])
+        
+        if news_score == 1 and is_hard_catalyst:
+            score += 20
+            reasons.extend([f"Hard Catalyst: {news_data.get('catalyst_type', 'news')} (+20)"])
+        elif news_score == 1 and not is_hard_catalyst:
+            score += 0
+            reasons.append("News: Positive sentiment but no hard catalyst (+0)")
+        elif news_score == 0:
+            reasons.append("News: Speculative sentiment (+0)")
+        elif news_score < 0:
+            score -= 25
+            reasons.extend([f"Bearish News: {news_data.get('summary', 'negative')} (-25)"])
+        
+        # Trend Alignment — Max +15
 
         # Catalyst (News) — Max +20
         news_items = per_coin_news.get(symbol, [])
