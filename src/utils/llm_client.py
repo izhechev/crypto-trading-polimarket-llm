@@ -39,8 +39,9 @@ class LLMClient:
                     response_format={"type": "json_object"},
                 )
                 return json.loads(response.choices[0].message.content)
-            except Exception as e:
-                logger.warning(f"Groq failed, switching to Gemini: {e}")
+            except Exception:
+                # Silence rate limit warnings to keep console clean
+                pass
 
         # Fallback to Gemini
         if self.gemini_model:

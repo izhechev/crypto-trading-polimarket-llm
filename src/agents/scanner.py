@@ -1727,36 +1727,16 @@ def run_smart_scanner(
         score = 50
         reasons = []
 
-        # Initialize news analyst
-        from src.agents.news_analyst.analyst import NewsAnalyst
-        analyst = NewsAnalyst()
-
-        from src.connectors.web_research import fetch_news_for_coins
-        news_items = fetch_news_for_coins([coin], limit_per_coin=3).get(symbol, [])
-        news_data = analyst.analyze_news(symbol, news_items)
-        
-        # news_score logic (1, 0, -1)
-        news_verdict = news_data.get("verdict", "neutral")
-        news_score = 1 if news_verdict == "bullish" else (-1 if news_verdict == "bearish" else 0)
-        
-        # New logging: symbol, news score, summary
-        print(f"  {symbol} (Score: {news_data.get('score', 0)}) - fetched news: {news_data.get('summary', 'No summary')}", flush=True)
-        
-        # Hard catalysts (partnerships, mainnet, listing, funding, ETF, launch, major upgrade)
-        # Verify the catalyst type is concrete
-        is_hard_catalyst = any(c in news_data.get("catalyst_type", "").lower() for c in 
-                               ["partnership", "mainnet", "listing", "funding", "etf", "launch", "upgrade", "buyback"])
-        
-        # News Analyst
+        # News Analyst & Fetching
         from src.agents.news_analyst.analyst import NewsAnalyst
         analyst = NewsAnalyst()
         from src.connectors.web_research import fetch_news_for_coins
         
-        # 1. Fetch & Analyze
+        # 1. Fetch & Analyze (Singular call)
         news_items = fetch_news_for_coins([coin], limit_per_coin=5).get(symbol, [])
         news_data = analyst.analyze_news(symbol, news_items)
         
-        # 2. Robust parsing
+        # 2. Robust parsing: handles list or unexpected types by defaulting to neutral
         if isinstance(news_data, list):
             news_data = news_data[0] if (news_data and isinstance(news_data[0], dict)) else {}
         if not isinstance(news_data, dict):
@@ -1767,7 +1747,6 @@ def run_smart_scanner(
         news_score_val = news_data.get("score", 0)
             
         print(f"  {symbol} (Score: {news_score_val}) - fetched news: {news_summary}", flush=True)
-        # Removed time.sleep(1.0) to allow faster processing; tenacity retries/Gemini fallback will handle limits.
         
         # 3. Catalyst scoring logic
         is_hard_catalyst = any(c in str(news_data.get("catalyst_type", "")).lower() for c in 

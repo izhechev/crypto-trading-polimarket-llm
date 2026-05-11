@@ -783,7 +783,9 @@ def fetch_news_for_coins(
     import re as _re
     per_coin: dict[str, list[dict]] = {}
     _cp_enabled  = bool(config.CRYPTOPANIC_API_KEY)
-    _use_tavily  = bool(config.TAVILY_API_KEY)
+    # Force-bypass Tavily to avoid 432 rate limit errors
+    _use_tavily = False
+
     _no_data_phrases = (
         "not directly mentioned", "no information", "not available",
         "no specific", "not mentioned",
