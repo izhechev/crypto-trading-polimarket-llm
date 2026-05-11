@@ -23,48 +23,24 @@ import config
 from src.utils.budget_tracker import log_llm_call, check_budget, BudgetExceededError
 
 
-def _call_groq(system_prompt: str, user_prompt: str, label: str) -> str | None:
-    """Make a single Groq API call with budget enforcement."""
+from src.utils.llm_client import LLMClient
+
+def _call_llm(prompt: str, system_prompt: str, label: str) -> str | None:
+    """Make a call using the unified LLMClient with automatic failover."""
     try:
         check_budget("groq")
     except BudgetExceededError as e:
         print(f"  [{label}] BUDGET EXCEEDED: {e}")
         return None
 
-    try:
-        from groq import Groq
-    except ImportError:
-        print(f"  [{label}] groq package not installed")
+    llm = LLMClient()
+    result = llm.call(prompt, system_prompt=system_prompt)
+    
+    if "error" in result:
+        print(f"  [{label}] LLM Error: {result['error']}")
         return None
-
-    client = Groq(api_key=config.GROQ_API_KEY)
-
-    try:
-        response = client.chat.completions.create(
-            model=config.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=1200,
-            temperature=0.3,
-        )
-    except Exception as e:
-        print(f"  [{label}] Groq API error: {e}")
-        return None
-
-    try:
-        usage = response.usage
-        log_llm_call(
-            model="groq",
-            tokens_in=usage.prompt_tokens if usage else 0,
-            tokens_out=usage.completion_tokens if usage else 0,
-            endpoint=f"debate_{label.lower()}",
-        )
-    except Exception:
-        pass
-
-    return response.choices[0].message.content.strip()
+        
+    return json.dumps(result)
 
 
 def _build_coin_context(
@@ -125,7 +101,7 @@ def run_bull_agent(coin_context: str) -> str | None:
     user = f"Make the bull case for buying this coin:\n\n{coin_context}"
 
     print("  [BULL] Generating bullish argument...")
-    return _call_groq(system, user, "BULL")
+    return _call_llm(user, system, "BULL")
 
 
 def run_bear_agent(coin_context: str) -> str | None:
@@ -144,7 +120,7 @@ def run_bear_agent(coin_context: str) -> str | None:
     user = f"Make the bear case against buying this coin:\n\n{coin_context}"
 
     print("  [BEAR] Generating bearish argument...")
-    return _call_groq(system, user, "BEAR")
+    return _call_llm(user, system, "BEAR")
 
 
 def run_risk_manager(
@@ -180,17 +156,14 @@ def run_risk_manager(
     )
 
     print("  [RISK MGR] Synthesizing verdict...")
-    raw = _call_groq(system, user, "RISK_MGR")
+    raw = _call_llm(user, system, "RISK_MGR")
     if not raw:
         return None
 
     try:
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        return json.loads(raw[start:end]) if start >= 0 else None
+        return json.loads(raw)
     except Exception:
-        print(f"  [RISK MGR] Failed to parse JSON:\n{raw[:200]}")
-        return None
+        return {"reasoning": raw}
 
 
 def run_debate(
