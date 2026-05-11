@@ -75,6 +75,39 @@
   letter-spacing: -0.02em;
 }
 
+.live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 4px 10px;
+  border-radius: 20px;
+  margin-left: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.1);
+}
+
+.live-indicator .dot {
+  width: 6px;
+  height: 6px;
+  background: #34d399;
+  border-radius: 50%;
+  box-shadow: 0 0 8px #34d399;
+  animation: pulse 1.5s infinite;
+}
+
+.live-indicator span {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #94b8d8;
+  letter-spacing: 0.05em;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.2); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
 .logo .sub {
   font-size: 0.8rem;
   color: #38bdf8;

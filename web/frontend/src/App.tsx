@@ -31,14 +31,19 @@ function App() {
   const [totalPnL, setTotalPnL] = useState<number>(0)
   const [scanStatus, setScanStatus] = useState<ScanStatus>({ is_running: false, last_output: '' })
   const [loading, setLoading] = useState(true)
+  const [lastTick, setLastTick] = useState<Date>(new Date())
 
   const fetchPositions = async () => {
     try {
-      const res = await fetch('/api/positions')
+      // Use timestamp to prevent browser caching
+      const res = await fetch(`/api/positions?t=${Date.now()}`)
       const data = await res.json()
-      setPositions(data.positions)
-      setNetWorth(data.net_worth_eur)
-      setTotalPnL(data.total_pnl_pct)
+      if (data && data.positions) {
+        setPositions(data.positions)
+        setNetWorth(data.net_worth_eur ?? 0)
+        setTotalPnL(data.total_pnl_pct ?? 0)
+        setLastTick(new Date())
+      }
     } catch (e) {
       console.error("Failed to fetch positions", e)
     } finally {
@@ -48,7 +53,7 @@ function App() {
 
   const fetchScanStatus = async () => {
     try {
-      const res = await fetch('/api/scan/status')
+      const res = await fetch(`/api/scan/status?t=${Date.now()}`)
       const data = await res.json()
       setScanStatus(data)
     } catch (e) {
@@ -73,15 +78,17 @@ function App() {
       fetchPositions()
     }, 1000)
     return () => clearInterval(interval)
-  }, [scanStatus.is_running])
+  }, [])
 
   const formatPrice = (val: number) => {
+    if (val === undefined || val === null) return '$0.00'
     const abs = Math.abs(val)
     const decimals = abs >= 1 ? 2 : abs >= 0.01 ? 4 : abs >= 0.0001 ? 6 : 8
     return `$${val.toFixed(decimals)}`
   }
 
   const formatCurrency = (val: number, currency: string = '€') => {
+    if (val === undefined || val === null) return `${currency}0.00`
     return `${currency}${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
   }
 
@@ -92,6 +99,10 @@ function App() {
           <div className="logo">
             <TrendingUp className="icon-blue" size={32} strokeWidth={2.5} />
             <h1>CryptoAdvisor <span className="sub">Trading Desk</span></h1>
+            <div className="live-indicator">
+              <div className="dot"></div>
+              <span>LIVE: {lastTick.toLocaleTimeString()}</span>
+            </div>
           </div>
           <div className="metrics">
             <div className="metric">

@@ -99,6 +99,7 @@ class PositionsResponse(BaseModel):
 
 @app.get("/api/positions", response_model=PositionsResponse)
 async def get_positions():
+    print(f"[{datetime.now()}] GET /api/positions")
     positions = []
     fixed_allocation_eur = 100.0
     
@@ -114,7 +115,8 @@ async def get_positions():
     
     try:
         holdings, _ = fetch_kraken_portfolio()
-    except Exception:
+    except Exception as e:
+        print(f"Kraken error: {e}")
         if config.PORTFOLIO_PATH.exists():
             with open(config.PORTFOLIO_PATH, 'r') as f:
                 holdings = json.load(f).get("holdings", [])
@@ -132,15 +134,19 @@ async def get_positions():
     
     if needs_logo:
         try:
-            # We use CoinGecko just for logos once in a while
+            print(f"Fetching logos for: {needs_logo}")
             prices = fetch_prices(list(needs_logo))
             for p in prices:
                 logo_cache[p.coin_id] = p.image_url
-                # Also fallback price if Binance doesn't have it
+                # Map coin_id -> symbol for better Binance lookup
+                # Some coins have different symbols on CG vs Binance
+                if p.coin_id and p.symbol:
+                    # e.g. "snt-status" -> "SNT"
+                    pass 
                 if p.symbol not in realtime_prices:
                     realtime_prices[p.symbol] = p.price_usd
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Logo fetch error: {e}")
 
     total_current_value_eur = 0.0
     total_investment_eur = 0.0
@@ -151,12 +157,19 @@ async def get_positions():
         symbol = (rec.get("coin") or cid or "?").upper()
         
         entry = float(rec.get("entry_price") or 0)
-        # Use Binance real-time price, fallback to rec current_price or entry
-        curr = realtime_prices.get(symbol, float(rec.get("current_price") or entry))
+        # Try exact symbol, then common variations
+        curr = realtime_prices.get(symbol)
+        if curr is None:
+            curr = float(rec.get("current_price") or entry)
         
         pnl = ((curr - entry) / entry * 100) if entry > 0 else 0
-        curr_val_eur = fixed_allocation_eur * (1 + pnl/100)
         
+        # Suspicious data check (e.g. 10x in a day might be wrong entry)
+        reasoning = rec.get("reasoning")
+        if pnl > 500: # Flag extremely high PnL as potentially stale entry
+            reasoning = f"[⚠️ Stale Entry?] {reasoning}"
+
+        curr_val_eur = fixed_allocation_eur * (1 + pnl/100)
         total_current_value_eur += curr_val_eur
         total_investment_eur += fixed_allocation_eur
 
@@ -173,7 +186,7 @@ async def get_positions():
             logo_url=logo_cache.get(cid),
             stop_loss=float(rec.get("stop_loss")) if rec.get("stop_loss") else None,
             take_profit=float(rec.get("take_profit")) if rec.get("take_profit") else None,
-            reasoning=rec.get("reasoning"),
+            reasoning=reasoning,
             date=rec.get("date")
         ))
 
@@ -193,7 +206,7 @@ async def get_positions():
             existing.type = "PORTFOLIO"
         else:
             if amt > 0:
-                curr_val_eur = amt * curr * 0.92 # Approx conversion
+                curr_val_eur = amt * curr * 0.92 
                 total_current_value_eur += curr_val_eur
                 total_investment_eur += (amt * entry * 0.92)
             else:
@@ -215,6 +228,7 @@ async def get_positions():
             ))
 
     total_pnl_pct = ((total_current_value_eur - total_investment_eur) / total_investment_eur * 100) if total_investment_eur > 0 else 0
+    print(f"Response: {len(positions)} pos, Net Worth: {total_current_value_eur:.2f} EUR")
 
     return PositionsResponse(
         positions=positions,
