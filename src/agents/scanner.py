@@ -1536,7 +1536,9 @@ def run_smart_scanner(
     pump_coins = raw_pump_coins
 
     # Check existing watchlist for crashes that now qualify for whale ride entry
+    print("  Debug: Checking watchlist crashes...")
     auto_watchlist_rides = _check_watchlist_crashes(exchange_coins + raw_pump_coins)
+    print("  Debug: Watchlist crash check complete.")
     if auto_watchlist_rides:
         print(f"  🐋 {len(auto_watchlist_rides)} AUTO WHALE RIDE(S) triggered from pump watchlist!")
 
@@ -1680,7 +1682,7 @@ def run_smart_scanner(
             continue   # hard pre-exclude (pumped/micro-cap/low-float)
         quick_scored.append((coin, qs, qr))
     quick_scored.sort(key=lambda x: x[1], reverse=True)
-    candidates = quick_scored[:80]
+    candidates = quick_scored[:500]
 
     # 5b. Compute sector averages from the full coin list (narrative momentum)
     sector_avgs = _compute_sector_avgs(exchange_coins)
@@ -1716,14 +1718,17 @@ def run_smart_scanner(
 
     # 6b. Fetch OHLCV + compute TA for each candidate
     # print(f"\n  Computing TA for {len(candidates)} candidates (top250 by pre-filter score)...")
-    from tqdm import tqdm
     results      = []
     wash_trading = []  # symbols excluded for wash trading
     _bearish_skip_count = 0       # tracks market-wide bearish alignment skips
     _market_wide_announced = False  # print the relaxed-mode banner only once
-    for i, (coin, qs, qr) in tqdm(enumerate(candidates), total=len(candidates), desc="  Computing TA"):
+    
+    total_candidates = len(candidates)
+    print(f"  Debug: Starting TA analysis for {total_candidates} candidates...")
+    for i, (coin, qs, qr) in enumerate(candidates):
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
+        print(f"  Scanning {i+1}/{total_candidates}: {symbol}")
         
         # ── Conservative Engine Scoring (Base: 50) ──
         score = 50
@@ -2215,17 +2220,13 @@ def run_smart_scanner(
     else:
         print("\n  💰  TOP SPOT PICKS: none found")
 
-    # ── HOLD fill: show open positions when fewer than 3 quality new picks ──
-    quality_picks = top_longs + top_shorts + top_spots
-    if len(quality_picks) < 3 and open_positions:
-        needed      = 3 - len(quality_picks)
-        hold_fills  = [p for p in open_positions if not p["is_stale"]][:needed]
-        if hold_fills:
-            print(f"\n  📌  HOLD POSITIONS  (filling {needed} slot(s) — fewer than 3 new picks)\n" + "-" * 60)
-            for p in hold_fills:
-                pnl_str = f"{p['pnl_pct']:+.1f}%" if p["pnl_pct"] is not None else "N/A"
-                print(f"  📌 {p['symbol']:8s} HOLD  |  entry: ${p['entry']:.4f}  TP: ${p['tp']:.4f}  "
-                      f"PnL: {pnl_str}  age: {p['age_days']}d")
+    # ── HOLD positions display (always show) ──
+    if open_positions:
+        print(f"\n  📌  HOLD POSITIONS ({len(open_positions)} active)\n" + "-" * 60)
+        for p in open_positions:
+            pnl_str = f"{p['pnl_pct']:+.1f}%" if p["pnl_pct"] is not None else "N/A"
+            print(f"  📌 {p['symbol']:8s} HOLD  |  entry: ${p['entry']:.4f}  TP: ${p['tp']:.4f}  "
+                  f"PnL: {pnl_str}  age: {p['age_days']}d")
 
     # ── Pump alerts — classified display ──────────────────────────────────
     if pump_classified:
