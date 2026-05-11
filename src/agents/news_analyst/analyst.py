@@ -36,16 +36,18 @@ class NewsAnalyst:
         ])
         
         prompt = f"""
-        Analyze these crypto news items for {coin_symbol}. Determine if they represent a CONCRETE, fundamental trade catalyst.
-        
-        Hard catalysts: Mainnet launches, strategic partnerships, exchange listings (major), funding rounds, ETF approvals, or major protocol upgrades.
-        Speculative/Noise: Price predictions, generic market commentary, vague social media hype.
+        Analyze these crypto news items for {coin_symbol}. You must determine a directional score (0-10) for the asset.
+
+        0: Major Negative (Hack, Delisting, Exploit, Insolvency, Regulatory Ban).
+        1-3: Noise/Speculation (Price predictions, generic market chatter, SEO fluff).
+        4-7: Moderate (General development, community activity, non-major partnerships).
+        8-10: Major Fundamental Catalyst (Institutional funding, Tier-1 exchange listing, Mainnet launch, major protocol upgrade).
 
         Respond ONLY in JSON with:
         - "verdict": "bullish" | "bearish" | "neutral"
-        - "score": (integer 0-10 based on catalyst strength)
-        - "catalyst_type": ("partnership", "mainnet", "listing", "funding", "etf", "launch", "upgrade", "buyback", or "none")
-        - "summary": (concise explanation of the fundamental impact)
+        - "score": (integer 0-10 based on the scale above)
+        - "catalyst_type": (e.g., "listing", "mainnet", "none", "exploit")
+        - "summary": (brief, factual reason for this score)
 
         Data:
         {context}

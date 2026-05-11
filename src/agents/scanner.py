@@ -168,11 +168,21 @@ def _fetch_ohlcv_kraken(symbol: str, days: int) -> list[dict]:
         return []
 
 
-def _fetch_ta_data(coin_id: str) -> dict:
-    """Helper to fetch or retrieve TA data for a coin."""
-    # Assuming _fetch_ohlcv_for_coin is needed, but we don't have the coin object here.
-    # I'll implement a stub that calls compute_ta if possible.
-    return {} # Stub for now
+def _fetch_ta_data(coin: dict) -> dict:
+    """Helper to fetch or retrieve TA data for a coin using fallback OHLCV."""
+    try:
+        symbol = coin.get("symbol", "").upper()
+        ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
+        if not ohlcv:
+            return {}
+        ta = compute_ta(coin.get("id", ""), symbol, ohlcv)
+        return {
+            "rsi": ta.rsi_14,
+            "macd_bullish": ta.macd_signal == "BULLISH",
+            "trend": ta.trend
+        }
+    except Exception:
+        return {}
 
 
 # Pre-built CG ID map — populated once per scan in run_smart_scanner, reused per-coin.
@@ -1741,12 +1751,7 @@ def run_smart_scanner(
     for i, (coin, qs, qr) in enumerate(candidates):
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
-        print(f"  Scanning {i+1}/{total_candidates}: {symbol}")
         
-        # ── Conservative Engine Scoring (Base: 50) ──
-        score = 50
-        reasons = []
-        # [NEWS LOGIC DISABLED]
         # ── Conservative Engine Scoring (Base: 50) ──
         score = 50
         reasons = []
@@ -1757,7 +1762,7 @@ def run_smart_scanner(
             reasons.append("Trend Alignment (+15)")
         
         # Technicals — Max +15
-        ta_data = _fetch_ta_data(coin_id)
+        ta_data = _fetch_ta_data(coin)
         if ta_data:
             if ta_data.get("rsi", 50) < 40:
                 score += 5; reasons.append("Oversold RSI (+5)")
@@ -1772,10 +1777,21 @@ def run_smart_scanner(
 
         # R:R Gate (Assume 2.0x TP / 0.9x SL for initial screening)
         # Entry = price, SL = 0.9*price, TP = 1.2*price => 2.0x Reward:Risk
-        rr = (1.2 * coin.get("current_price", 0)) / (0.9 * coin.get("current_price", 0))
-        if rr < 1.8:
+        rr_val = 0.0
+        cur_price = coin.get("current_price", 0)
+        if cur_price > 0:
+            reward = (1.2 * cur_price) - cur_price
+            risk = cur_price - (0.9 * cur_price)
+            rr_val = reward / risk
+        
+        if rr_val < 1.8:
             score -= 30
-            reasons.append(f"R:R too low ({rr:.1f})")
+            reasons.append(f"R:R too low ({rr_val:.1f})")
+
+        ch7d = coin.get("price_change_percentage_7d_in_currency", 0)
+        rsi_val = ta_data.get("rsi", 0) if ta_data else 0
+        macd_val = "Bull" if (ta_data and ta_data.get("macd_bullish")) else "Bear"
+        print(f"  Scanning {i+1}/{total_candidates}: {symbol:8s} - score: {score:2d} | 7d: {ch7d:+6.1f}% | RSI: {rsi_val:4.1f} | MACD: {macd_val}")
 
         # Filter: Only actionable scores
         if score < 85:
