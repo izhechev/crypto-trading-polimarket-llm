@@ -1710,6 +1710,48 @@ def run_smart_scanner(
     for i, (coin, qs, qr) in tqdm(enumerate(candidates), total=len(candidates), desc="  Computing TA"):
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
+        
+        # ── Conservative Engine Scoring (Base: 50) ──
+        score = 50
+        reasons = []
+
+        # Catalyst (News) — Max +20 (placeholder for now)
+        # score += 20; reasons.append("Real Catalyst (+20)")
+        
+        # Trend Alignment — Max +15
+        if coin.get("price_change_percentage_7d_in_currency", 0) > 0:
+            score += 15
+            reasons.append("Trend Alignment (+15)")
+        
+        # Technicals — Max +15
+        ta_data = _fetch_ta_data(coin_id)
+        if ta_data:
+            if ta_data.get("rsi", 50) < 40:
+                score += 5; reasons.append("Oversold RSI (+5)")
+            if ta_data.get("macd_bullish", False):
+                score += 5; reasons.append("Bullish MACD (+5)")
+            # Add BB Logic if available...
+
+        # Penalties
+        score -= regime_penalty
+        if regime_penalty > 0:
+            reasons.append(f"Regime Penalty (-{regime_penalty})")
+
+        # R:R Gate (Assume 2.0x TP / 0.9x SL for initial screening)
+        # Entry = price, SL = 0.9*price, TP = 1.2*price => 2.0x Reward:Risk
+        rr = (1.2 * coin.get("current_price", 0)) / (0.9 * coin.get("current_price", 0))
+        if rr < 1.8:
+            score -= 30
+            reasons.append(f"R:R too low ({rr:.1f})")
+
+        # Filter: Only actionable scores
+        if score < 85:
+            continue
+            
+        coin["score"] = score
+        coin["reasons"] = reasons
+        coin["recommended_order"] = "LONG"
+        results.append(coin)
         # print(f"  [{i+1}/{len(candidates)}] {symbol:<12} score={qs:+d}  fetching OHLCV...", end="", flush=True)
         try:
             ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
