@@ -1545,8 +1545,9 @@ def run_smart_scanner(
     # Classify pump coins and update watchlist
     pump_classified: list[dict] = []
     if raw_pump_coins:
-        # print(f"  {len(raw_pump_coins)} pump alert(s) (>100% 7d) — classifying...")
-        pass
+        print("  Debug: Starting pump classification...")
+        pump_classified = _classify_pump_coins(raw_pump_coins)
+        print("  Debug: Pump classification finished.")
 
     # 4d. Manual exclusions from portfolio.json
     portfolio_symbols = set()
@@ -1685,25 +1686,12 @@ def run_smart_scanner(
     candidates = quick_scored[:500]
 
     # 5b. Compute sector averages from the full coin list (narrative momentum)
+    print("  Debug: Computing sector averages...")
     sector_avgs = _compute_sector_avgs(exchange_coins)
-    trending_sectors = [s for s, avg in sector_avgs.items() if avg > 20]
-    if trending_sectors:
-        # print(f"  Trending sectors: {', '.join(trending_sectors)}")
-        pass
+    print("  Debug: Sector averages complete.")
 
-    # 5c. Batch-fetch news for all 40 candidates (used for news catalyst scoring)
-    candidate_coins = [c for c, _, _ in candidates]
-    per_coin_news: dict[str, list[dict]] = {}
-    try:
-        import config as _cfg
-        from src.connectors.web_research import fetch_news_for_coins
-        _src = "Tavily AI" if _cfg.TAVILY_API_KEY else "Google News RSS"
-        # print(f"  Fetching news for {len(candidate_coins)} candidates ({_src})...")
-        per_coin_news = fetch_news_for_coins(candidate_coins, limit_per_coin=5)
-        found = sum(1 for v in per_coin_news.values() if v)
-        # print(f"  News found for {found}/{len(candidate_coins)} candidates")
-    except Exception as e:
-        print(f"  News fetch skipped: {e}")
+    # News analysis deferred to per-coin loop (Top 50 only)
+    per_coin_news = {}
 
     # 6. Pre-build CG ID map once (avoids one CG API call per coin in the loop)
     global _cg_id_cache
@@ -1781,7 +1769,6 @@ def run_smart_scanner(
         coin["reasons"] = reasons
         coin["recommended_order"] = "LONG"
         results.append(coin)
-        # print(f"  [{i+1}/{len(candidates)}] {symbol:<12} score={qs:+d}  fetching OHLCV...", end="", flush=True)
         try:
             ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
             if not ohlcv or len(ohlcv) < _MIN_CANDLES:
@@ -1794,6 +1781,7 @@ def run_smart_scanner(
             wash_bonus = 2 if is_wash else 0
 
             ta    = compute_ta(coin_id, symbol, ohlcv)
+            print(f"  {symbol} - scanned")
             vm    = round((coin.get("total_volume") or 0) / max(coin.get("market_cap") or 1, 1), 3)
             # These must be resolved before scoring calls
             trend_val = getattr(ta, "trend", None)
