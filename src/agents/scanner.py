@@ -1747,28 +1747,16 @@ def run_smart_scanner(
         is_hard_catalyst = any(c in news_data.get("catalyst_type", "").lower() for c in 
                                ["partnership", "mainnet", "listing", "funding", "etf", "launch", "upgrade", "buyback"])
         
-        if news_score == 1 and is_hard_catalyst:
-            score += 20
-            reasons.extend([f"Hard Catalyst: {news_data.get('catalyst_type', 'news')} (+20)"])
-        elif news_score == 1 and not is_hard_catalyst:
-            score += 0
-            reasons.append("News: Positive sentiment but no hard catalyst (+0)")
-        elif news_score == 0:
-            reasons.append("News: Speculative sentiment (+0)")
-        elif news_score < 0:
-            score -= 25
-            reasons.extend([f"Bearish News: {news_data.get('summary', 'negative')} (-25)"])
-        
-        # Trend Alignment — Max +15
-
         # News Analyst
         from src.agents.news_analyst.analyst import NewsAnalyst
         analyst = NewsAnalyst()
         from src.connectors.web_research import fetch_news_for_coins
+        
+        # 1. Fetch & Analyze
         news_items = fetch_news_for_coins([coin], limit_per_coin=3).get(symbol, [])
         news_data = analyst.analyze_news(symbol, news_items)
         
-        # Robust news parsing
+        # 2. Robust parsing
         if isinstance(news_data, dict):
             news_verdict = news_data.get("verdict", "neutral")
             news_summary = news_data.get("summary", "No summary")
@@ -1779,8 +1767,9 @@ def run_smart_scanner(
             news_score_val = 0
             
         print(f"  {symbol} (Score: {news_score_val}) - fetched news: {news_summary}", flush=True)
+        time.sleep(1.0) # Rate limit respect
         
-        # Catalyst scoring logic
+        # 3. Catalyst scoring logic
         is_hard_catalyst = any(c in str(news_data.get("catalyst_type", "")).lower() for c in 
                                ["partnership", "mainnet", "listing", "funding", "etf", "launch", "upgrade", "buyback"])
         
