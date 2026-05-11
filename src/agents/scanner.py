@@ -1749,17 +1749,20 @@ def run_smart_scanner(
         print(f"  {symbol} (Score: {news_score_val}) - fetched news: {news_summary}", flush=True)
         
         # 3. Catalyst scoring logic
-        is_hard_catalyst = any(c in str(news_data.get("catalyst_type", "")).lower() for c in 
-                               ["partnership", "mainnet", "listing", "funding", "etf", "launch", "upgrade", "buyback"])
+        # 0: Negative, 1-3: Noise, 4-7: Moderate, 8-10: Major Catalyst
+        news_score_val = news_data.get("score", 5) # Default to 5 (neutral) if missing
         
-        if news_verdict == "bullish" and is_hard_catalyst:
+        if news_score_val >= 8:
             score += 20
-            reasons.append(f"Hard Catalyst (+20)")
-        elif news_verdict == "bullish":
-            reasons.append("News: Positive sentiment (+0)")
-        elif news_verdict == "bearish":
-            score -= 25
-            reasons.append(f"Bearish News (-25)")
+            reasons.append(f"Major Catalyst (Score {news_score_val}) (+20)")
+        elif news_score_val == 0:
+            score -= 30
+            reasons.append(f"Major Negative News (Score {news_score_val}) (-30)")
+        elif 1 <= news_score_val <= 3:
+            reasons.append("News: Speculative/Noise sentiment (+0)")
+        elif 4 <= news_score_val <= 7:
+            score += 5
+            reasons.append(f"News: Moderate development (Score {news_score_val}) (+5)")
         
         # Trend Alignment — Max +15
         if coin.get("price_change_percentage_7d_in_currency", 0) > 0:
