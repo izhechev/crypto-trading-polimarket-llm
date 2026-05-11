@@ -1739,7 +1739,8 @@ def run_smart_scanner(
         news_verdict = news_data.get("verdict", "neutral")
         news_score = 1 if news_verdict == "bullish" else (-1 if news_verdict == "bearish" else 0)
         
-        print(f"  {symbol} - fetched news: {news_data.get('summary', 'No summary')}", flush=True)
+        # New logging: symbol, news score, summary
+        print(f"  {symbol} (Score: {news_data.get('score', 0)}) - fetched news: {news_data.get('summary', 'No summary')}", flush=True)
         
         # Hard catalysts (partnerships, mainnet, listing, funding, ETF, launch, major upgrade)
         # Verify the catalyst type is concrete
@@ -1760,18 +1761,37 @@ def run_smart_scanner(
         
         # Trend Alignment — Max +15
 
-        # Catalyst (News) — Max +20
-        news_items = per_coin_news.get(symbol, [])
-        news_score, news_reasons = _news_score(news_items, symbol=symbol, coin_name=coin.get("name", ""))
-        # news_score returns 1 (Hard Catalyst), 0 (Neutral/Speculative), or -1 (Bearish)
-        if news_score == 1:
+        # News Analyst
+        from src.agents.news_analyst.analyst import NewsAnalyst
+        analyst = NewsAnalyst()
+        from src.connectors.web_research import fetch_news_for_coins
+        news_items = fetch_news_for_coins([coin], limit_per_coin=3).get(symbol, [])
+        news_data = analyst.analyze_news(symbol, news_items)
+        
+        # Robust news parsing
+        if isinstance(news_data, dict):
+            news_verdict = news_data.get("verdict", "neutral")
+            news_summary = news_data.get("summary", "No summary")
+            news_score_val = news_data.get("score", 0)
+        else:
+            news_verdict = "neutral"
+            news_summary = "Analysis failed"
+            news_score_val = 0
+            
+        print(f"  {symbol} (Score: {news_score_val}) - fetched news: {news_summary}", flush=True)
+        
+        # Catalyst scoring logic
+        is_hard_catalyst = any(c in str(news_data.get("catalyst_type", "")).lower() for c in 
+                               ["partnership", "mainnet", "listing", "funding", "etf", "launch", "upgrade", "buyback"])
+        
+        if news_verdict == "bullish" and is_hard_catalyst:
             score += 20
-            reasons.extend(news_reasons)
-        elif news_score == 0:
-            reasons.append("News: Speculative sentiment (+0)")
-        elif news_score < 0:
+            reasons.append(f"Hard Catalyst (+20)")
+        elif news_verdict == "bullish":
+            reasons.append("News: Positive sentiment (+0)")
+        elif news_verdict == "bearish":
             score -= 25
-            reasons.extend(news_reasons)
+            reasons.append(f"Bearish News (-25)")
         
         # Trend Alignment — Max +15
         if coin.get("price_change_percentage_7d_in_currency", 0) > 0:
