@@ -1703,11 +1703,12 @@ def run_smart_scanner(
 
     # 6b. Fetch OHLCV + compute TA for each candidate
     # print(f"\n  Computing TA for {len(candidates)} candidates (top250 by pre-filter score)...")
+    from tqdm import tqdm
     results      = []
     wash_trading = []  # symbols excluded for wash trading
     _bearish_skip_count = 0       # tracks market-wide bearish alignment skips
     _market_wide_announced = False  # print the relaxed-mode banner only once
-    for i, (coin, qs, qr) in enumerate(candidates):
+    for i, (coin, qs, qr) in tqdm(enumerate(candidates), total=len(candidates), desc="  Computing TA"):
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
         # print(f"  [{i+1}/{len(candidates)}] {symbol:<12} score={qs:+d}  fetching OHLCV...", end="", flush=True)
