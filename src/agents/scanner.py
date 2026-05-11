@@ -2107,11 +2107,11 @@ def run_smart_scanner(
     final_results = filtered_results + normal_results[30:]
     
     # ── Most Valuable Only ──
-    # Show Top Long/Short/Spot picks that meet 100% confidence technical score thresholds
-    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG" and r.get("score", 0) >= 10]
-    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT" and r.get("score", 0) >= 10]
-    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT" and r.get("score", 0) >= 8]
-    top10 = normal_results[:10]
+    # Show Top Long/Short/Spot picks that meet 85+ confidence technical score thresholds
+    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG" and r.get("score", 0) >= 85]
+    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT" and r.get("score", 0) >= 85]
+    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT" and r.get("score", 0) >= 85]
+    top10 = [r for r in normal_results if r.get("score", 0) >= 85]
 
     # Fetch 1-sentence news catalysts for actual picks
     picks_to_fetch = top_longs + top_shorts + top_spots
