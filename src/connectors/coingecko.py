@@ -222,6 +222,7 @@ def _fetch_prices_live(coin_ids: list[str], cache_key: str) -> list[CryptoPrice]
             name=coin["name"],
             price_usd=usd,
             price_eur=eur,
+            image_url=coin.get("image"),
             market_cap=coin.get("market_cap", 0) or 0,
             volume_24h=coin.get("total_volume", 0) or 0,
             change_24h=coin.get("price_change_percentage_24h", 0) or 0,

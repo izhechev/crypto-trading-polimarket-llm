@@ -1,5 +1,5 @@
 """Data models for CryptoAdvisor."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Literal
 from pydantic import BaseModel, Field
 
@@ -17,9 +17,10 @@ class CryptoPrice(BaseModel):
     change_24h: float
     change_7d: float
     change_30d: Optional[float] = None
+    image_url: Optional[str] = None
     ath: Optional[float] = None
     ath_change_pct: Optional[float] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class OHLCVData(BaseModel):
@@ -56,7 +57,7 @@ class TechnicalAnalysis(BaseModel):
 class FearGreedIndex(BaseModel):
     value: int  # 0-100
     label: str  # "Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed"
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class SentimentAnalysis(BaseModel):
@@ -79,7 +80,7 @@ class PolymarketEvent(BaseModel):
     volume: float
     liquidity: float
     end_date: Optional[datetime] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class PolymarketShift(BaseModel):
@@ -89,7 +90,7 @@ class PolymarketShift(BaseModel):
     old_odds: float
     new_odds: float
     shift_pct: float  # absolute change
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # === Trading Signals ===
@@ -105,7 +106,7 @@ class TradingSignal(BaseModel):
     reasoning: str = ""
     bull_case: str = ""
     bear_case: str = ""
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # === LLM Call Logging ===
@@ -116,4 +117,4 @@ class LLMCallLog(BaseModel):
     tokens_out: int
     cost_usd: float  # 0 for free tier
     endpoint: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
