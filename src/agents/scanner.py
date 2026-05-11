@@ -1459,8 +1459,10 @@ def run_smart_scanner(
     eth_ch24 = next((c.get("price_change_percentage_24h", 0) for c in coins if c.get("symbol") == "ETH"), 0)
     
     is_risk_off = (btc_ch24 < -3.0 and eth_ch24 < -3.0)
+    regime_penalty = 15 if is_risk_off else 0
+    
     if is_risk_off:
-        print(f"  ⚠️  MARKET REGIME: RISK-OFF (BTC {btc_ch24:+.1f}%, ETH {eth_ch24:+.1f}%) — tightening entry requirements")
+        print(f"  ⚠️  MARKET REGIME: RISK-OFF (BTC {btc_ch24:+.1f}%, ETH {eth_ch24:+.1f}%) — score penalty applied (-15)")
     else:
         print(f"  ✅ MARKET REGIME: STABLE/BULLISH")
 
