@@ -32,6 +32,7 @@ DUNE_API_KEY = os.getenv("DUNE_API_KEY", "")
 COIN_MARKET_CAP_API_KEY = os.getenv("COIN_MARKET_CAP_API_KEY", "")
 MESSARI_API_KEY = os.getenv("MESSARI_API_KEY", "")
 ETHER_SCAN_API_KEY = os.getenv("ETHER_SCAN_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Serial scam / manipulation tracking is now fully automatic.
 # See src/agents/coin_risk_assessor.py — real-time detection via news + on-chain signals.
