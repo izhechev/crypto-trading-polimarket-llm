@@ -1304,6 +1304,24 @@ def _build_whale_ride(coin: dict, crash_reason: str, prev_trades: list[dict]) ->
         except (ValueError, KeyError):
             pass
 
+    # News Analyst
+    from src.agents.news_analyst.analyst import NewsAnalyst
+    from src.connectors.web_research import fetch_news_for_coins
+    
+    analyst = NewsAnalyst()
+    news_items = fetch_news_for_coins([coin], limit_per_coin=3).get(symbol, [])
+    news_data = analyst.analyze_news(symbol, news_items)
+    if isinstance(news_data, list):
+        news_data = news_data[0] if (news_data and isinstance(news_data[0], dict)) else {}
+    if not isinstance(news_data, dict):
+        news_data = {}
+
+    news_verdict = news_data.get("verdict", "neutral")
+    news_summary = news_data.get("summary", "No summary")
+    news_score_val = news_data.get("score", 0)
+
+    print(f"  🐋 {symbol} (News Score: {news_score_val}) - {news_summary}")
+
     return {
         "symbol":         symbol,
         "name":           coin.get("name", symbol),
@@ -1322,6 +1340,8 @@ def _build_whale_ride(coin: dict, crash_reason: str, prev_trades: list[dict]) ->
         "change_24h":     coin.get("price_change_percentage_24h") or 0,
         "change_7d":      coin.get("price_change_percentage_7d_in_currency") or 0,
         "market_cap":     coin.get("market_cap") or 0,
+        "news_score":     news_score_val,
+        "news_summary":   news_summary
     }
 
 
@@ -1726,11 +1746,11 @@ def run_smart_scanner(
         # ── Conservative Engine Scoring (Base: 50) ──
         score = 50
         reasons = []
-
+        # [NEWS LOGIC DISABLED]
         # ── Conservative Engine Scoring (Base: 50) ──
         score = 50
         reasons = []
-        # [NEWS BYPASSED FOR DEBUGGING]
+        # [NEWS LOGIC DISABLED]
         # Trend Alignment — Max +15
         if coin.get("price_change_percentage_7d_in_currency", 0) > 0:
             score += 15
@@ -2160,26 +2180,22 @@ def run_smart_scanner(
     # Include the rest of the results that weren't checked for liquidity
     final_results = filtered_results + normal_results[30:]
     
-    # ── WATCHLIST (Scores 50-84) ──
-    # Show Top 10 coins that are good but didn't reach 85+ conviction.
-    watchlist_candidates = [r for r in normal_results if 50 <= r.get("score", 0) < 85]
-    watchlist_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-    top_watchlist = watchlist_candidates[:10]
+    # ── FINAL RANKING DISPLAY ──
+    # Display ALL analyzed coins sorted by score, separating Actionable vs Watchlist
+    sorted_results = sorted(final_results, key=lambda x: x.get("score", 0), reverse=True)
+    
+    print(f"\n  MOST VALUABLE OPPORTUNITIES (TOP 10 RANKED)\n" + "=" * 60)
+    
+    # Top 10 (Actionable or Watchlist)
+    for rank, r in enumerate(sorted_results[:10], 1):
+        label = "🔥 ACTIONABLE " if r.get("score", 0) >= 85 else "👀 WATCHLIST "
+        _print_pick(rank, r, _catalysts, label=label)
 
-    if top_watchlist:
-        print(f"\n  👀  WATCHLIST (Scores 50-84 — Not Actionable)")
-        print("-" * 30)
-        for rank, r in enumerate(top_watchlist, 1):
-            _print_pick(rank, r, _catalysts, label="[WATCHLIST] ")
-    else:
-        print("\n  👀  WATCHLIST: none found")
-
-    # ── Most Valuable Only ──
-    # Show Top Long/Short/Spot picks that meet 85+ confidence technical score thresholds
-    top_longs  = [r for r in normal_results if r["recommended_order"] == "LONG" and r.get("score", 0) >= 85]
-    top_shorts = [r for r in normal_results if r["recommended_order"] == "SHORT" and r.get("score", 0) >= 85]
-    top_spots  = [r for r in normal_results if r["recommended_order"] == "SPOT" and r.get("score", 0) >= 85]
-    top10 = [r for r in normal_results if r.get("score", 0) >= 85]
+    # Filter into categories for the return
+    top_longs  = [r for r in final_results if r.get("recommended_order") == "LONG" and r.get("score", 0) >= 85]
+    top_shorts = [r for r in final_results if r.get("recommended_order") == "SHORT" and r.get("score", 0) >= 85]
+    top_spots  = [r for r in final_results if r.get("recommended_order") == "SPOT" and r.get("score", 0) >= 85]
+    top10 = [r for r in sorted_results if r.get("score", 0) >= 85]
 
     # Fetch 1-sentence news catalysts for actual picks
     picks_to_fetch = top_longs + top_shorts + top_spots
