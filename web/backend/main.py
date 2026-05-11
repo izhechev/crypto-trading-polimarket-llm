@@ -96,10 +96,13 @@ def price_poller_task():
             
             # Fetch prices
             from src.connectors.coingecko import fetch_prices
+            print(f"DEBUG: Polling CoinGecko for {len(to_fetch)} assets: {to_fetch}")
             prices = fetch_prices(list(to_fetch))
+            print(f"DEBUG: Received {len(prices)} price updates.")
             if prices:
                 for p in prices:
                     realtime_prices[p.symbol.upper()] = p.price
+                    print(f"DEBUG: Updated {p.symbol} to {p.price}")
         except Exception as e:
             print(f"CoinGecko price poller error: {e}")
 
