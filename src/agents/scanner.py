@@ -1502,6 +1502,16 @@ def run_smart_scanner(
         # print(f"  ({micro_caps} illiquid coins excluded: real mcap <$20M or volume <$100K/day)")
         pass
 
+    # 1b. Fetch CMC trending symbols for bonus scoring
+    trending_symbols: set[str] = set()
+    try:
+        from src.connectors.coinmarketcap import fetch_trending as _cmc_trending
+        trending_symbols = set(_cmc_trending())
+        if trending_symbols:
+            print(f"  CMC trending: {', '.join(sorted(trending_symbols))}")
+    except Exception:
+        pass
+
     # 4. Filter to exchange-available only (skip if no exchange specified)
     if allowed is not None:
         exchange_coins = [c for c in clean_coins if c.get("symbol", "").upper() in allowed]
