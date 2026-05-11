@@ -2365,8 +2365,8 @@ def run_smart_scanner(
     return top10, pump_coins, valuable_wr, quality_count, _catalysts, categories
 
 
-def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
-    """Helper to print a pick's details with God-Tier security and liquidity info."""
+def _print_pick(rank: int, r: dict, catalysts: dict, label: str = "") -> None:
+    """Helper to print a pick's details with security and liquidity info."""
     supply_tag   = "  [⚠️ MED SUPPLY — HALF SIZE]" if r.get("supply_risk") == "MEDIUM" else ""
     hold_tag      = "  [📌 OPEN — HOLD]" if r.get("_already_open") else ""
     
@@ -2379,17 +2379,18 @@ def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
     liq_str  = f"${liq_usd/1e3:.0f}k" if liq_usd < 1e6 else f"${liq_usd/1e6:.1f}M"
     liq_icon = "💧" if liq_usd >= 100_000 else "⚠️"
 
-    print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  score: {r['score']} pts{supply_tag}{hold_tag}")
-    print(f"     Price: ${r['price']:.4f}  |  24h: {r['change_24h']:+.1f}%  |  7d: {r['change_7d']:+.1f}%")
+    print(f"\n  {rank}. {r['symbol']} ({r['name']})  —  {label}score: {r.get('score', 0)} pts{supply_tag}{hold_tag}")
+    print(f"     Price: ${r.get('price', 0):.4f}  |  24h: {r.get('change_24h', 0):+.1f}%  |  7d: {r.get('change_7d', 0):+.1f}%")
     print(f"     {sec_icon} SECURITY: {sec_text}  |  {liq_icon} LIQUIDITY: {liq_str}")
-    print(f"     RSI {r['rsi']:.1f}  |  MACD: {r['macd']}  |  Trend: {r['trend']}")
-    print(f"     Signals: {', '.join(r['reasons']) if r['reasons'] else 'none'}")
-    cat_summary = catalysts.get(r["symbol"].upper(), "No recent news found")
-    print(f"     📰 News:  {cat_summary}")
+    if 'rsi' in r:
+        print(f"     RSI {r['rsi']:.1f}  |  MACD: {r['macd']}  |  Trend: {r['trend']}")
+    print(f"     Signals: {', '.join(r['reasons']) if r.get('reasons') else 'none'}")
     
-    # Extract just the summary part if it's a long JSON object
+    cat_summary = catalysts.get(r["symbol"].upper(), "No recent news found")
     if isinstance(cat_summary, dict):
         print(f"     📰 Summary: {cat_summary.get('summary', 'No summary')}")
+    else:
+        print(f"     📰 News:  {cat_summary}")
 
 
 def _send_telegram_valuable(
