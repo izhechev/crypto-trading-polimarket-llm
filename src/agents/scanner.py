@@ -1432,6 +1432,28 @@ def run_smart_scanner(
         if allowed is not None:
             print(f"  {len(allowed)} unique base assets on {label}")
 
+    # 2. Top coins market data — CoinPaprika (primary, single free request), CoinGecko fallback
+    _cp_ok = False
+    coins: list[dict] = []
+    print(f"  Fetching top {_top_n} from CoinPaprika (primary)...")
+    try:
+        coins = _fetch_top_coinpaprika(limit=_top_n)
+        if coins:
+            _cp_ok = True
+    except Exception as e:
+        print(f"  CoinPaprika failed: {e} — falling back to CoinGecko")
+
+    if not coins:
+        try:
+            coins = _fetch_top_250_coingecko(pages=_pages)
+        except Exception as e:
+            print(f"  ERROR: CoinGecko also failed: {e}")
+            return [], [], [], 0, {}
+
+    if not coins:
+        print("  ERROR: no coin data from any source")
+        return [], [], [], 0, {}
+
     # 1c. Determine Market Regime (BTC/ETH performance)
     btc_ch24 = next((c.get("price_change_percentage_24h", 0) for c in coins if c.get("symbol") == "BTC"), 0)
     eth_ch24 = next((c.get("price_change_percentage_24h", 0) for c in coins if c.get("symbol") == "ETH"), 0)
@@ -1441,31 +1463,6 @@ def run_smart_scanner(
         print(f"  ⚠️  MARKET REGIME: RISK-OFF (BTC {btc_ch24:+.1f}%, ETH {eth_ch24:+.1f}%) — tightening entry requirements")
     else:
         print(f"  ✅ MARKET REGIME: STABLE/BULLISH")
-
-    # 2. Top coins market data — CoinPaprika (primary, single free request), CoinGecko fallback
-    _cp_ok = False
-    coins: list[dict] = []
-    print(f"  Fetching top {_top_n} from CoinPaprika (primary)...")
-    try:
-        coins = _fetch_top_coinpaprika(limit=_top_n)
-        if coins:
-            _cp_ok = True
-            # print(f"  Got {len(coins)} coins from CoinPaprika")
-    except Exception as e:
-        print(f"  CoinPaprika failed: {e} — falling back to CoinGecko")
-
-    if not coins:
-        # print(f"  Fetching top 1000 from CoinGecko ({_pages} page{'s' if _pages > 1 else ''})...")
-        try:
-            coins = _fetch_top_250_coingecko(pages=_pages)
-            # print(f"  Got {len(coins)} coins from CoinGecko")
-        except Exception as e:
-            print(f"  ERROR: CoinGecko also failed: {e}")
-            return [], [], [], 0, {}
-
-    if not coins:
-        print("  ERROR: no coin data from any source")
-        return [], [], [], 0, {}
 
     # 3. Filter out stablecoins, wrapped tokens, tokenized stocks, wash traders, and permanently excluded
     excluded = STABLECOINS | WRAPPED_TOKENS | TOKENIZED_STOCKS | WASH_TRADING_CONFIRMED | PERMANENTLY_EXCLUDED
