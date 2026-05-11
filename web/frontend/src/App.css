@@ -23,6 +23,44 @@
   margin-bottom: 30px;
 }
 
+.logo-section {
+  display: flex;
+  align-items: center;
+  gap: 40px;
+}
+
+.metrics {
+  display: flex;
+  gap: 30px;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.metric label {
+  font-size: 0.65rem;
+  color: #4a7a9b;
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+
+.metric .value {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: #f0f8ff;
+}
+
+.metric .value.pos { color: #6ee7b7; }
+.metric .value.neg { color: #fca5a5; }
+
 .logo {
   display: flex;
   align-items: center;
@@ -51,7 +89,26 @@
   filter: drop-shadow(0 0 8px rgba(56,189,248,0.5));
 }
 
-.btn-scan {
+svg {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.btn-scan svg {
+  margin-right: 4px;
+}
+
+.pos svg, .neg svg {
+  margin-right: 2px;
+}
+
+.tag svg {
+  margin-right: 4px;
+}
+
+.date-footer svg {
+  margin-right: 4px;
+}
   display: flex;
   align-items: center;
   gap: 8px;

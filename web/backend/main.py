@@ -60,9 +60,15 @@ class ScanStatus(BaseModel):
     last_output: str
     last_scan_ts: Optional[datetime] = None
 
-@app.get("/api/positions", response_model=List[Position])
+class PositionsResponse(BaseModel):
+    positions: List[Position]
+    net_worth_eur: float
+    total_pnl_pct: float
+
+@app.get("/api/positions", response_model=PositionsResponse)
 async def get_positions():
     positions = []
+    fixed_allocation_eur = 100.0 # Default as requested
     
     # 1. Load from recommendations.csv (OPEN positions)
     rec_path = config.DATA_DIR / "recommendations.csv"
@@ -102,20 +108,33 @@ async def get_positions():
         except Exception as e:
             print(f"Error fetching prices: {e}")
 
+    total_current_value_eur = 0.0
+    total_investment_eur = 0.0
+
     # Process open recommendations
     for rec in open_recs:
         cid = rec.get("coin_id")
         p = price_map.get(cid) if cid else None
         
+        coin_name = rec.get("coin") or cid or "Unknown"
+        symbol = p.symbol if p else (rec.get("coin") or cid or "?").upper()
+        
         entry = float(rec.get("entry_price") or 0)
         curr = p.price_usd if p else float(rec.get("current_price") or entry)
         pnl = ((curr - entry) / entry * 100) if entry > 0 else 0
         
+        # Calculate EUR value (assuming 100 EUR entry)
+        # Using a simplified 1:1 USD/EUR if eur price not available for pnl, 
+        # but let's use fixed_allocation_eur * (1 + pnl/100)
+        curr_val_eur = fixed_allocation_eur * (1 + pnl/100)
+        total_current_value_eur += curr_val_eur
+        total_investment_eur += fixed_allocation_eur
+
         positions.append(Position(
-            coin=rec.get("coin", cid or "Unknown"),
-            symbol=p.symbol if p else rec.get("coin", "").upper(),
+            coin=coin_name,
+            symbol=symbol,
             coin_id=cid,
-            amount=0, # Not specified in recs usually
+            amount=0, 
             entry_price=entry,
             current_price=curr,
             pnl_pct=pnl,
@@ -145,9 +164,24 @@ async def get_positions():
             existing.amount = amt
             existing.type = "PORTFOLIO"
         else:
+            # For manual holdings, we use the actual amount if available, 
+            # otherwise assume fixed allocation
+            if amt > 0:
+                # Value in EUR
+                curr_eur = p.price_eur if p else (curr * 0.92) # Fallback rate
+                curr_val_eur = amt * curr_eur
+                total_current_value_eur += curr_val_eur
+                total_investment_eur += (amt * (entry * 0.92))
+            else:
+                curr_val_eur = fixed_allocation_eur * (1 + pnl/100)
+                total_current_value_eur += curr_val_eur
+                total_investment_eur += fixed_allocation_eur
+
+            asset_name = h.get("asset") or cid or "Unknown"
+            symbol = p.symbol if p else (h.get("asset") or cid or "?").upper()
             positions.append(Position(
-                coin=h.get("asset", cid or "Unknown"),
-                symbol=p.symbol if p else h.get("asset", "").upper(),
+                coin=asset_name,
+                symbol=symbol,
                 coin_id=cid,
                 amount=amt,
                 entry_price=entry,
@@ -158,8 +192,13 @@ async def get_positions():
                 logo_url=p.image_url if p else None,
             ))
 
+    total_pnl_pct = ((total_current_value_eur - total_investment_eur) / total_investment_eur * 100) if total_investment_eur > 0 else 0
 
-    return positions
+    return PositionsResponse(
+        positions=positions,
+        net_worth_eur=total_current_value_eur,
+        total_pnl_pct=total_pnl_pct
+    )
 
 @app.get("/api/scan/status", response_model=ScanStatus)
 async def get_scan_status():

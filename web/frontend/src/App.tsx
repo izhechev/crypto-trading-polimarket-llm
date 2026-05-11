@@ -27,6 +27,8 @@ interface ScanStatus {
 
 function App() {
   const [positions, setPositions] = useState<Position[]>([])
+  const [netWorth, setNetWorth] = useState<number>(0)
+  const [totalPnL, setTotalPnL] = useState<number>(0)
   const [scanStatus, setScanStatus] = useState<ScanStatus>({ is_running: false, last_output: '' })
   const [loading, setLoading] = useState(true)
 
@@ -34,7 +36,9 @@ function App() {
     try {
       const res = await fetch('/api/positions')
       const data = await res.json()
-      setPositions(data)
+      setPositions(data.positions)
+      setNetWorth(data.net_worth_eur)
+      setTotalPnL(data.total_pnl_pct)
     } catch (e) {
       console.error("Failed to fetch positions", e)
     } finally {
@@ -79,12 +83,30 @@ function App() {
     return `$${val.toFixed(decimals)}`
   }
 
+  const formatCurrency = (val: number, currency: string = '€') => {
+    return `${currency}${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  }
+
   return (
     <div className="dashboard">
       <header className="header glass">
-        <div className="logo">
-          <TrendingUp className="icon-blue" />
-          <h1>CryptoAdvisor <span className="sub">Trading Desk</span></h1>
+        <div className="logo-section">
+          <div className="logo">
+            <TrendingUp className="icon-blue" size={32} strokeWidth={2.5} />
+            <h1>CryptoAdvisor <span className="sub">Trading Desk</span></h1>
+          </div>
+          <div className="metrics">
+            <div className="metric">
+              <label>Net Worth</label>
+              <span className="value">{formatCurrency(netWorth)}</span>
+            </div>
+            <div className="metric">
+              <label>Total P&L</label>
+              <span className={`value ${totalPnL >= 0 ? 'pos' : 'neg'}`}>
+                {totalPnL >= 0 ? '+' : ''}{totalPnL.toFixed(2)}%
+              </span>
+            </div>
+          </div>
         </div>
         <div className="actions">
           <button 
@@ -92,7 +114,11 @@ function App() {
             onClick={runScan}
             disabled={scanStatus.is_running}
           >
-            {scanStatus.is_running ? <RefreshCw className="spin" /> : <Search />}
+            {scanStatus.is_running ? (
+              <RefreshCw className="spin" size={20} strokeWidth={2.5} />
+            ) : (
+              <Search size={20} strokeWidth={2.5} />
+            )}
             {scanStatus.is_running ? 'Scanning...' : 'Run Scan'}
           </button>
         </div>
@@ -110,7 +136,21 @@ function App() {
                   <div className="card-header">
                     <div className="coin-info">
                       {pos.logo_url ? (
-                        <img src={pos.logo_url} alt={pos.symbol} className="coin-logo" />
+                        <img 
+                          src={pos.logo_url} 
+                          alt={pos.symbol} 
+                          className="coin-logo" 
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).style.display = 'none';
+                            const parent = (e.target as HTMLImageElement).parentElement;
+                            if (parent) {
+                              const placeholder = document.createElement('div');
+                              placeholder.className = 'coin-logo-placeholder';
+                              placeholder.innerText = pos.symbol[0];
+                              parent.prepend(placeholder);
+                            }
+                          }}
+                        />
                       ) : (
                         <div className="coin-logo-placeholder">{pos.symbol[0]}</div>
                       )}
@@ -121,7 +161,11 @@ function App() {
                     </div>
                     <div className="tags">
                       <span className={`tag ${pos.type.toLowerCase()}`}>
-                        {pos.type === 'WHALE_RIDE' ? <Anchor size={12} /> : <Shield size={12} />}
+                        {pos.type === 'WHALE_RIDE' ? (
+                          <Anchor size={14} strokeWidth={2.5} />
+                        ) : (
+                          <Shield size={14} strokeWidth={2.5} />
+                        )}
                         {pos.type}
                       </span>
                     </div>
@@ -143,7 +187,11 @@ function App() {
                       <div className="pnl-header">
                         <label>P&L</label>
                         <span className={pos.pnl_pct >= 0 ? 'pos' : 'neg'}>
-                          {pos.pnl_pct >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+                          {pos.pnl_pct >= 0 ? (
+                            <TrendingUp size={16} strokeWidth={2.5} />
+                          ) : (
+                            <TrendingDown size={16} strokeWidth={2.5} />
+                          )}
                           {pos.pnl_pct.toFixed(2)}%
                         </span>
                       </div>
@@ -170,7 +218,7 @@ function App() {
                   )}
                   {pos.date && (
                     <div className="date-footer">
-                      <Clock size={12} /> {new Date(pos.date).toLocaleString()}
+                      <Clock size={12} strokeWidth={2.5} /> {new Date(pos.date).toLocaleString()}
                     </div>
                   )}
                 </div>
