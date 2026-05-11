@@ -2384,8 +2384,12 @@ def _print_pick(rank: int, r: dict, catalysts: dict) -> None:
     print(f"     {sec_icon} SECURITY: {sec_text}  |  {liq_icon} LIQUIDITY: {liq_str}")
     print(f"     RSI {r['rsi']:.1f}  |  MACD: {r['macd']}  |  Trend: {r['trend']}")
     print(f"     Signals: {', '.join(r['reasons']) if r['reasons'] else 'none'}")
-    cat = catalysts.get(r["symbol"].upper(), "No recent news found")
-    print(f"     📰 News:  {cat}")
+    cat_summary = catalysts.get(r["symbol"].upper(), "No recent news found")
+    print(f"     📰 News:  {cat_summary}")
+    
+    # Extract just the summary part if it's a long JSON object
+    if isinstance(cat_summary, dict):
+        print(f"     📰 Summary: {cat_summary.get('summary', 'No summary')}")
 
 
 def _send_telegram_valuable(
