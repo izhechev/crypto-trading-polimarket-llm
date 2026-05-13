@@ -242,28 +242,51 @@ def update_open_positions() -> None:
         print(f"  Warning: CG price update failed: {e}")
         usd_map = {}
 
-    # CoinPaprika scanner rows store IDs like "snt-status"; CoinGecko price
-    # endpoints need the CoinGecko ID ("status"). Resolve by symbol for misses.
+    # CoinPaprika scanner rows store IDs like "banana-banana-for-scale"; CoinGecko
+    # doesn't know these IDs so we must resolve them. Strategy:
+    #  1. Try CoinPaprika ticker directly (correct price for CP-format IDs)
+    #  2. Fall back to resolve_cg_id → CoinGecko (only for CG-format IDs)
     missing_after_markets = [r for r in open_rows if r.get("coin_id") and r.get("coin_id") not in usd_map]
     if missing_after_markets:
-        try:
-            from src.connectors.coingecko import fetch_simple_usd
-            from src.connectors.coinpaprika import resolve_cg_id
+        # ── Step 1: CoinPaprika direct ticker (handles CP-format coin_ids) ──
+        import httpx as _httpx
+        for r in missing_after_markets:
+            cid = r.get("coin_id", "")
+            if cid in usd_map:
+                continue
+            try:
+                _resp = _httpx.get(
+                    f"https://api.coinpaprika.com/v1/tickers/{cid}",
+                    timeout=8,
+                )
+                if _resp.status_code == 200:
+                    _price = _resp.json().get("quotes", {}).get("USD", {}).get("price")
+                    if _price:
+                        usd_map[cid] = float(_price)
+            except Exception:
+                pass
 
-            cg_to_original: dict[str, list[str]] = {}
-            for r in missing_after_markets:
-                cid = r.get("coin_id", "")
-                sym = r.get("coin", "").upper()
-                cg_id = resolve_cg_id(sym) or cid
-                if cg_id:
-                    cg_to_original.setdefault(cg_id, []).append(cid)
+        # ── Step 2: resolve_cg_id for anything still missing ──
+        still_missing = [r for r in missing_after_markets if r.get("coin_id") not in usd_map]
+        if still_missing:
+            try:
+                from src.connectors.coingecko import fetch_simple_usd
+                from src.connectors.coinpaprika import resolve_cg_id
 
-            simple_map = fetch_simple_usd(list(cg_to_original))
-            for cg_id, usd in simple_map.items():
-                for cid in cg_to_original.get(cg_id, []):
-                    usd_map[cid] = usd
-        except Exception:
-            pass
+                cg_to_original: dict[str, list[str]] = {}
+                for r in still_missing:
+                    cid = r.get("coin_id", "")
+                    sym = r.get("coin", "").upper()
+                    cg_id = resolve_cg_id(sym) or cid
+                    if cg_id:
+                        cg_to_original.setdefault(cg_id, []).append(cid)
+
+                simple_map = fetch_simple_usd(list(cg_to_original))
+                for cg_id, usd in simple_map.items():
+                    for cid in cg_to_original.get(cg_id, []):
+                        usd_map[cid] = usd
+            except Exception:
+                pass
 
     # ── Multi-Source Fallback (Binance/Kraken) ──
     # If a price is missing from CG, try other exchanges

@@ -87,7 +87,7 @@ def search_google_news(query: str, limit: int = 5) -> list[dict]:
     Fetch Google News RSS for a query.
     Returns list of {title, url, date}.
     """
-    encoded = quote_plus(f"{query} crypto OR stock OR finance")
+    encoded = quote_plus(query)
     url     = f"https://news.google.com/rss/search?q={encoded}&hl=en&gl=US&ceid=US:en"
     resp    = _safe_get(url, timeout=12)
     if not resp:
@@ -590,40 +590,21 @@ def _groq_agentic_news(coins: list[dict]) -> dict[str, str]:
 
 def get_top10_catalysts(coins: list[dict]) -> dict[str, str]:
     """
-    Return {symbol: "1-sentence news summary"} for each coin in the list.
-
-    Priority:
-      1. Groq + web search (Brave or DuckDuckGo) — Groq synthesises from real results.
-      2. Tavily template fallback — only if key set AND quota not exceeded.
-      3. DuckDuckGo direct — raw headline/snippet, no Groq.
-      4. Google News RSS — always-available last resort.
-
-    Empty string = no news found for that coin.
+    Return {symbol: "most recent headline"} for each coin using Google News RSS only.
+    Only articles ≤7 days old are used; unknown-age articles are skipped.
     """
     if not coins:
         return {}
 
-    symbols  = [c.get("symbol", "").upper() for c in coins]
-    names    = {c.get("symbol", "").upper(): c.get("name", "") for c in coins}
-    result: dict[str, str] = {s: "" for s in symbols}
-
-    # ── 1. Groq + web search (NewsData.io → DDG) ─────────────────────────
-    _has_newsdata2 = bool(config.NEWSDATA_API_KEY)
-    try:
-        from duckduckgo_search import DDGS as _DDGS2  # noqa: F401
-        _has_ddg2 = True
-    except ImportError:
-        _has_ddg2 = False
-
-    if config.GROQ_API_KEY and (_has_newsdata2 or _has_ddg2):
-        _backend = "NewsData.io" if _has_newsdata2 else "DuckDuckGo"
-        print(f"  🤖 Groq + {_backend} researching news for {len(coins)} coins...")
-        agentic = _groq_agentic_news(coins)
-        if agentic:
-            for sym in symbols:
-                result[sym] = agentic.get(sym, "")
-            return result
-        print(f"  ⚠️  Groq+{_backend} returned nothing — falling back")
+    per_coin = fetch_news_for_coins(coins, limit_per_coin=5)
+    result: dict[str, str] = {}
+    for coin in coins:
+        sym   = coin.get("symbol", "").upper()
+        items = per_coin.get(sym, [])
+        # Keep only recent articles (≤168h, known age)
+        fresh = [n for n in items if n.get("age_hours") is not None and n.get("age_hours") <= 168]
+        result[sym] = fresh[0]["title"][:120] if fresh else ""
+    return result
 
     # ── 2. Tavily template fallback (if quota not exceeded) ───────────────
     if config.TAVILY_API_KEY and not _tavily_quota_exceeded:
@@ -733,7 +714,8 @@ def _parse_age_hours(date_val) -> float | None:
             return max(0, (now - published).total_seconds() / 3600)
         if isinstance(date_val, str):
             # ISO 8601: "2026-04-10T14:23:00Z" or "2026-04-10T14:23:00+00:00"
-            if "T" in date_val:
+            # Must start with YYYY-MM-DDT to avoid matching "GMT" in RFC-2822 strings
+            if len(date_val) >= 11 and date_val[4] == "-" and "T" in date_val:
                 published = datetime.fromisoformat(date_val.replace("Z", "+00:00"))
                 if published.tzinfo is None:
                     published = published.replace(tzinfo=timezone.utc)
@@ -798,15 +780,30 @@ def fetch_news_for_coins(
         seen:  set[str]   = set()
 
         def _add(title: str, date_val, source: str = "") -> None:
-            if title and title not in seen:
-                seen.add(title)
-                age_h = _parse_age_hours(date_val)
-                items.append({
-                    "title":     title,
-                    "age_hours": age_h,
-                    "is_recent": (age_h is not None and age_h <= 2.0),
-                    "source":    source,
-                })
+            if not title or title in seen:
+                return
+            # Relevance gate: article title must mention the coin symbol or name.
+            # Skip coins with very short/ambiguous symbols (< 4 chars) if the name
+            # is also too short — impossible to filter reliably.
+            _tl = title.lower()
+            _sl = sym.lower()
+            _nl = (name or "").lower()
+            if len(_sl) >= 4:
+                _relevant = _sl in _tl or (len(_nl) >= 4 and _nl in _tl)
+            elif len(_nl) >= 5:
+                _relevant = _nl in _tl
+            else:
+                _relevant = True  # symbol and name too short — can't filter safely
+            if not _relevant:
+                return
+            seen.add(title)
+            age_h = _parse_age_hours(date_val)
+            items.append({
+                "title":     title,
+                "age_hours": age_h,
+                "is_recent": (age_h is not None and age_h <= 2.0),
+                "source":    source,
+            })
 
         if _use_tavily:
             # ── 1. Tavily — AI-powered news (1 credit per coin) ──────────────
@@ -854,6 +851,7 @@ def fetch_news_for_coins(
                         _add(article.get("title", ""), None, "CryptoPanic")
                 except Exception:
                     pass
+
 
         if items:
             per_coin[sym] = items[:limit_per_coin + 5]   # keep generously for scoring

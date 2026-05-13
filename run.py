@@ -490,66 +490,59 @@ def run_scan_cycle(
     # Scanner - returns only valuable_wr + bundled categories
     top10, pump_alerts, whale_rides, quality_count, tavily_catalysts, categories = run_smart_scanner(exchange=exchange, fear_greed=fg, open_count=_open_count)
 
-    if not top10:
+    # Use all tier spots (score >= 3, up to 24) for analysis — not just top 10
+    top_spots = categories.get("spots", top10)
+    if not top_spots and not top10:
         print("  No results from scanner — skipping analysis.")
         print_scan_summary(top10=[], whale_rides=whale_rides, fear_greed=fg)
         print_track_record()
         return
 
-    # News for all top 10
-    import config as _cfg
-    from src.connectors.web_research import fetch_news_for_coins
-    per_coin_news_pre = fetch_news_for_coins(top10, limit_per_coin=5)
-    news_lines: list[str] = []
-    for sym, items in per_coin_news_pre.items():
-        for it in items[:2]:
-            age_tag = f"({it.get('age_days', '?')}d ago)" if it.get('age_days') is not None else "(date unknown)"
-            news_lines.append(f"  {sym}: {age_tag} {it.get('title','')[:90]}")
-    news_text = "\n".join(news_lines)
+    analysis_coins = top_spots if top_spots else top10
 
     # Sentiment analysis
     sentiment_text = ""
     try:
         from src.agents.sentiment_analyst import analyze_sentiment_batch, format_for_prompt as fmt_sentiment
-        all_symbols = [r["symbol"] for r in top10]
-        sentiments = analyze_sentiment_batch(all_symbols, coin_names=[r.get("name","") for r in top10], fear_greed=fg)
+        all_symbols = [r["symbol"] for r in analysis_coins]
+        sentiments = analyze_sentiment_batch(all_symbols, coin_names=[r.get("name","") for r in analysis_coins], fear_greed=fg)
         sentiment_text = fmt_sentiment(sentiments)
         if sentiment_text:
             _SENTIMENT_DELTA = {"VERY_BULLISH": 1, "BULLISH": 0, "NEUTRAL": 0, "BEARISH": 0, "VERY_BEARISH": -1}
             for sym, s in sentiments.items():
                 delta = _SENTIMENT_DELTA.get(s.social_sentiment, 0)
                 if delta != 0:
-                    for r in top10:
+                    for r in analysis_coins:
                         if r["symbol"].upper() == sym.upper():
                             r["score"] += delta; break
-            top10.sort(key=lambda x: (x["score"], x.get("change_24h", 0)), reverse=True)
+            analysis_coins.sort(key=lambda x: (x["score"], x.get("change_24h", 0)), reverse=True)
     except Exception: pass
 
     # Enrichment
-    all_symbols = [r["symbol"] for r in top10]
+    all_symbols = [r["symbol"] for r in analysis_coins]
     enrichment_text = fetch_enrichment(all_symbols)
 
     # Groq Analysis
     from src.utils.logger import _read as _log_read, log_recommendation, log_whale_ride
     _all_rows = _log_read()
     _already_open_syms = {r.get("coin", "").upper() for r in _all_rows if r.get("status") == "OPEN"}
-    
-    new_candidates = [r for r in top10 if r["symbol"].upper() not in _already_open_syms]
+
+    new_candidates = [r for r in analysis_coins if r["symbol"].upper() not in _already_open_syms]
     recs: list[dict] = []
     groq_candidates = []
-    
+
     if new_candidates:
         combined_context = "\n\n".join(filter(None, [enrichment_text, sentiment_text]))
         print_header("GROQ LLM ANALYSIS")
         try:
             groq_result = analyze_with_groq(
-                top10, fg, news_text,
+                analysis_coins, fg,
                 enrichment_text=combined_context,
-                per_coin_news=per_coin_news_pre,
+                per_coin_news={},
                 already_open=_already_open_syms,
                 tavily_catalysts=tavily_catalysts,
             )
-            recs_raw, groq_candidates = groq_result if isinstance(groq_result, tuple) else (groq_result, top10)
+            recs_raw, groq_candidates = groq_result if isinstance(groq_result, tuple) else (groq_result, analysis_coins)
             recs = recs_raw if isinstance(recs_raw, list) else ([recs_raw] if recs_raw else [])
         except Exception as e:
             print(f"  ⚠️  Groq failed: {e}")
@@ -569,83 +562,73 @@ def run_scan_cycle(
             print("     Blocking all new LONG/SPOT entries until market stabilizes.")
     except Exception: pass
 
-    # We require a strict Groq HIGH confidence verdict (>= 0.8) OR 
-    # a Medium confidence (>= 0.6) with a near-perfect technical score.
-    best_picks = []
-    for r in recs:
-        if r.get("verdict") != "BUY": continue
-        conf = r.get("confidence_score", 0)
-        score = r.get("scanner_score", 0)
-        side = r.get("recommended_order", "SPOT")
-        
-    # We require a strict Groq HIGH confidence verdict (>= 0.8) OR 
-    # a Medium confidence (>= 0.6) with a near-perfect technical score.
+    # God-Tier: HIGH confidence (>= 0.8) OR Medium (>= 0.6) with elite technical score.
+    _CONF_MAP  = {"high": 0.9, "medium": 0.6, "low": 0.3}
+    _score_map = {c["symbol"].upper(): c.get("score", 0) for c in analysis_coins}
     best_picks = []
     print("\n  🔍 God-Tier Filter Check:")
     for r in recs:
         sym = r["coin"].upper()
-        if r.get("verdict") != "BUY": 
-            print(f"     ❌ {sym} rejected: Groq verdict is {r.get('verdict')}")
+        if r.get("advisory_only", False):
+            print(f"     ❌ {sym} rejected: advisory_only=True")
             continue
-        
-        conf = r.get("confidence_score", 0)
-        score = r.get("scanner_score", 0)
-        side = r.get("recommended_order", "SPOT")
-        
-        is_high_conf = conf >= 0.8
-        is_elite_tech = (side in ("LONG", "SHORT") and score >= 11) or (side == "SPOT" and score >= 10)
-        
+
+        conf  = _CONF_MAP.get((r.get("confidence") or "low").lower(), 0.3)
+        score = _score_map.get(sym, 0)
+        side  = r.get("recommended_order", "SPOT")
+
+        is_high_conf  = conf >= 0.8
+        is_elite_tech = (side == "SPOT" and score >= 10)
+
         if is_high_conf or (conf >= 0.6 and is_elite_tech):
             best_picks.append(r)
         else:
             reason = "AI confidence too low" if conf < 0.6 else "Needs elite score for medium confidence"
             print(f"     ❌ {sym} rejected: {reason} (Conf: {r.get('confidence','?')}, Score: {score})")
-    
+
     if best_picks:
         print_header("GOD-TIER HIGH-CONVICTION OPPORTUNITIES")
         for i, p in enumerate(best_picks, 1):
-            _sym  = p["coin"].upper()
-            _side = p.get("recommended_order", "SPOT")
-            _conf = p.get("confidence", "LOW")
-            _score = p.get("scanner_score", 0)
-            
-            # Final God-Tier Technical Gate (must be >= 10 L/S or >= 8 Spot)
-            _meets_base_god_tier = (_side in ("LONG", "SHORT") and _score >= 10) or (_side == "SPOT" and _score >= 8)
+            _sym   = p["coin"].upper()
+            _side  = p.get("recommended_order", "SPOT")
+            _conf  = p.get("confidence", "low").upper()
+            _score = _score_map.get(_sym, 0)
 
-            if _meets_base_god_tier:
-                # Apply BTC Gate: Block Long/Spot if BTC is bearish
-                if _btc_gate_active and _side in ("LONG", "SPOT"):
-                    print(f"     🛑 {_sym} rejected: BTC Safety Gate is BLOCKING longs.")
-                    continue
-
-                if _sym in _already_open_syms:
-                    print(f"     ℹ️  {_sym} rejected: Position already OPEN.")
-                    continue
-
-                _ep = float(p.get("entry_price") or 0)
-                _cid = p.get("coin_id")
-                if not _cid:
-                    matched = next((r for r in top10 if r["symbol"].upper() == _sym), None)
-                    if matched: _cid = matched["coin_id"]
-
-                if _ep > 0 and _cid:
-                    print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}, Score: {_score}) | Price: ${p.get('entry_price', 0):.4f}")
-                    print(f"     💬 {p.get('reasoning', '')[:120]}...")
-
-                    if _side == "SHORT": _tp, _sl = _ep * 0.90, _ep * 1.10
-                    else: _tp, _sl = _ep * 1.10, _ep * 0.90
-                    
-                    log_recommendation({
-                        "coin": _sym, "coin_id": _cid,
-                        "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
-                        "timeframe": "24h Window", "reasoning": f"God-Tier Conviction BUY. Conf: {_conf}, Score: {_score}.",
-                        "recommended_order": _side,
-                    }, fg.get("value", 50))
-                    _already_open_syms.add(_sym)
-                else:
-                    print(f"     ❌ {_sym} rejected: Missing price (${_ep}) or CoinID ({_cid})")
-            else:
+            # Final gate: SPOT score >= 8
+            if not (_side == "SPOT" and _score >= 8):
                 print(f"     ❌ {_sym} rejected: Technical score ({_score}) not elite enough for God-Tier mode.")
+                continue
+
+            if _btc_gate_active and _side == "SPOT":
+                print(f"     🛑 {_sym} rejected: BTC Safety Gate is BLOCKING longs.")
+                continue
+
+            if _sym in _already_open_syms:
+                print(f"     ℹ️  {_sym} rejected: Position already OPEN.")
+                continue
+
+            _ep  = float(p.get("entry_price") or 0)
+            _cid = p.get("coin_id")
+            if not _cid:
+                matched = next((c for c in analysis_coins if c["symbol"].upper() == _sym), None)
+                if matched:
+                    _cid = matched.get("coin_id") or matched.get("id")
+
+            if _ep > 0 and _cid:
+                _tp = float(p.get("take_profit") or _ep * 1.10)
+                _sl = float(p.get("stop_loss")   or _ep * 0.90)
+                print(f"  {i}. 🟢 {_side} | {_sym} (Conf: {_conf}, Score: {_score}) | Entry: ${_ep:.4f} | TP: ${_tp:.4f} | SL: ${_sl:.4f}")
+                print(f"     💬 {p.get('reasoning', '')[:120]}...")
+
+                log_recommendation({
+                    "coin": _sym, "coin_id": _cid,
+                    "entry_price": round(_ep, 8), "stop_loss": round(_sl, 8), "take_profit": round(_tp, 8),
+                    "timeframe": "24h Window", "reasoning": f"God-Tier Conviction. Conf: {_conf}, Score: {_score}.",
+                    "recommended_order": _side,
+                }, fg.get("value", 50))
+                _already_open_syms.add(_sym)
+            else:
+                print(f"     ❌ {_sym} rejected: Missing price (${_ep}) or CoinID ({_cid})")
     else:
         print("\n  ℹ️  No God-Tier BUY opportunities this cycle.")
 
@@ -792,6 +775,11 @@ def main():
     parser.add_argument("--debate",           action="store_true", help="Enable Bull/Bear/Risk Manager debate pipeline")
     parser.add_argument("--whale",            action="store_true", help="Run one whale ride check now (top 750 Kraken coins)")
     parser.add_argument("--tavily-status",    action="store_true", help="Show Tavily AI monthly credit usage")
+    parser.add_argument("--open",             metavar="SYMBOL",    help="Manually open a position: --open BTC --entry 103000 --tp 113000 --sl 95000")
+    parser.add_argument("--entry",            type=float,          help="Entry price for --open")
+    parser.add_argument("--tp",               type=float,          help="Take-profit price for --open (default: entry * 1.10)")
+    parser.add_argument("--sl",               type=float,          help="Stop-loss price for --open (default: entry * 0.90)")
+    parser.add_argument("--reason",           default="",          help="Optional reasoning for --open")
     parser.add_argument(
         "--exchange",
         choices=["revolut", "binance", "all"],
@@ -917,6 +905,50 @@ def main():
         from src.utils.budget_tracker import print_tavily_status
         print_tavily_status()
 
+    elif args.open:
+        sym = args.open.upper()
+        if not args.entry:
+            print(f"  ERROR: --entry is required when using --open. Example:")
+            print(f"  python run.py --open {sym} --entry 1.23 --tp 1.45 --sl 1.10")
+            sys.exit(1)
+
+        ep = args.entry
+        tp = args.tp or round(ep * 1.10, 8)
+        sl = args.sl or round(ep * 0.90, 8)
+
+        # Resolve coin_id from CoinGecko coin list
+        coin_id = ""
+        try:
+            from src.connectors.coingecko import load_coin_list
+            _coin_list = load_coin_list()
+            _match = next(
+                (c for c in _coin_list if c.get("symbol", "").upper() == sym),
+                None
+            )
+            if _match:
+                coin_id = _match.get("id", "")
+        except Exception as _e:
+            print(f"  Warning: could not resolve coin_id ({_e})")
+
+        from src.utils.logger import log_recommendation
+        print(f"\n  Opening manual position:")
+        print(f"    Coin   : {sym} (id: {coin_id or 'unknown'})")
+        print(f"    Entry  : ${ep:.6f}")
+        print(f"    TP     : ${tp:.6f}  (+{(tp/ep-1)*100:.1f}%)")
+        print(f"    SL     : ${sl:.6f}  ({(sl/ep-1)*100:.1f}%)")
+        if args.reason:
+            print(f"    Reason : {args.reason}")
+
+        log_recommendation({
+            "coin": sym, "coin_id": coin_id,
+            "entry_price": round(ep, 8),
+            "stop_loss":   round(sl, 8),
+            "take_profit": round(tp, 8),
+            "timeframe":   "Manual",
+            "reasoning":   args.reason or f"Manual entry by user.",
+            "recommended_order": "SPOT",
+        }, 50)
+
     else:
         # Default: prices, F&G, TA, portfolio
         prices = run_price_check()
@@ -934,6 +966,7 @@ def main():
         print(f"  🥊  python run.py --scan --debate            + Bull/Bear agent debate")
         print(f"  ⏱   python run.py --schedule                 auto-scan every 4h + Telegram")
         print(f"  🖥   streamlit run dashboard.py               → http://localhost:8501")
+        print(f"  📌  python run.py --open BTC --entry 103000 --tp 113000 --sl 95000")
         print(f"{'─'*62}\n")
 
 

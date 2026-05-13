@@ -104,6 +104,48 @@ def fetch_gainers_losers(limit: int = 5) -> dict:
         return empty
 
 
+def fetch_coin_news(symbol: str, limit: int = 5) -> list[dict]:
+    """Fetch latest news articles for a coin from CMC's content API.
+    Returns list of {title, date, source, url}. [] if key missing or API fails.
+    date is ISO 8601 string compatible with _parse_age_hours.
+    """
+    if not config.COIN_MARKET_CAP_API_KEY:
+        return []
+    cache_key = f"cmc_news_{symbol.upper()}"
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        with httpx.Client(timeout=12) as client:
+            resp = client.get(
+                f"{_BASE}/v1/content/posts/latest",
+                headers=_headers(),
+                params={"symbol": symbol.upper(), "limit": limit, "news_type": "news"},
+            )
+        if resp.status_code != 200:
+            _set_cache(cache_key, [])
+            return []
+        raw  = resp.json().get("data", {})
+        # API returns data.list or data as a plain list depending on plan/version
+        posts = raw.get("list", raw) if isinstance(raw, dict) else raw
+        results = []
+        for post in (posts or [])[:limit]:
+            title = (post.get("postTitle") or post.get("title") or "").strip()
+            if not title:
+                continue
+            results.append({
+                "title":  title,
+                "date":   post.get("createdAt") or post.get("publishedAt") or "",
+                "source": post.get("sourceName") or post.get("source") or "CMC",
+                "url":    post.get("sourceUrl")  or post.get("url")    or "",
+            })
+        _set_cache(cache_key, results)
+        return results
+    except Exception:
+        _set_cache(cache_key, [])
+        return []
+
+
 def format_for_prompt(trending: list[str], gainers_losers: dict) -> str:
     """Format CMC data for LLM prompt."""
     lines = []

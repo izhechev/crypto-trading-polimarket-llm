@@ -235,6 +235,8 @@ STABLECOINS = {
     "XAUT", "PAXG",
 }
 
+_MIN_CANDLES = 20  # Minimum daily candles required for reliable TA computation
+
 
 def _is_tokenized_stock(coin: dict) -> bool:
     """Return True if this coin is a tokenized equity/RWA that should be excluded.
@@ -671,11 +673,14 @@ def _quick_score(coin: dict, trending_symbols: set[str] | None = None) -> tuple[
         score -= 1
         reasons.append(f"24h bleeding {change_24h:+.1f}% (-1)")
 
-    # ── ATH distance (coiled spring potential) ─────────────────────────────
+    # ── ATH distance ───────────────────────────────────────────────────────
+    # > -60% below ATH: no signal
+    # -60% to -90%: healthy discount, buyers exist above → +1
+    # < -90%: death zone — 90%+ of holders are underwater, every rally gets sold → -1
     if ath_pct < -90:
-        score += 2
-        reasons.append(f"ATH {ath_pct:.0f}% — coiled spring (+2)")
-    elif ath_pct < -70:
+        score -= 1
+        reasons.append(f"ATH {ath_pct:.0f}% — overhead sell wall (-1)")
+    elif ath_pct < -60:
         score += 1
         reasons.append(f"ATH {ath_pct:.0f}% discount (+1)")
 
@@ -701,10 +706,11 @@ def _ta_score(rsi, macd_signal, bb_position, vol_mcap: float = 0.0) -> tuple[int
     """
     Technical score (v1.0 reset).
 
-    RSI:      <30 = +2 | 30-42 = +1 | 50-65 = +1 | 65-78 = +0 | >78 = gated out
-    MACD:     bullish = +1 | bearish = -1
-    Volume:   >0.50x = +2 | 0.30-0.50x = +1 | <0.30x = +0  (no exclusion — BTC/ETH have low ratio)
-    BB:       below lower = +1 | above upper = -2
+    RSI:        <30 = +2 | 30-42 = +1 | 50-65 = +1 | 65-78 = +0 | >78 = gated out
+    MACD:       bullish = +1 | bearish = -1
+    MACD+RSI:   both confirm direction = extra ±1 (prevents false signals in trendless markets)
+    Volume:     >0.50x = +2 | 0.30-0.50x = +1 | <0.30x = +0
+    BB:         below lower = +1 | above upper = -2
     """
     score = 0
     reasons = []
@@ -720,15 +726,21 @@ def _ta_score(rsi, macd_signal, bb_position, vol_mcap: float = 0.0) -> tuple[int
         elif 50 <= rsi <= 65:
             score += 1
             reasons.append(f"RSI {rsi:.1f} healthy momentum (+1)")
-        # 65-72: +0, already below overbought gate
+        # 65-78: +0, already below overbought gate
 
-    # MACD (standalone signal)
+    # MACD + RSI combo: confirmed direction earns an extra point
     if macd_signal == "BULLISH":
         score += 1
         reasons.append("MACD bullish (+1)")
+        if rsi is not None and rsi > 50:
+            score += 1
+            reasons.append(f"MACD+RSI confirmed bullish (RSI {rsi:.0f}>50) (+1)")
     elif macd_signal == "BEARISH":
         score -= 1
         reasons.append("MACD bearish (-1)")
+        if rsi is not None and rsi < 50:
+            score -= 1
+            reasons.append(f"MACD+RSI confirmed bearish (RSI {rsi:.0f}<50) (-1)")
 
     # Volume / mcap ratio
     if vol_mcap > 0.50:
@@ -796,10 +808,10 @@ def _catalyst_score(
         score += 1
         reasons.append(f"7d dip {change_7d:.0f}% (+1)")
 
-    # Coiled spring: deep ATH discount + deeply oversold
-    if ath_pct < -90 and rsi is not None and rsi < 35:
+    # Deeply oversold RSI = bounce potential (ATH position already handled in _quick_score)
+    if rsi is not None and rsi < 32:
         score += 1
-        reasons.append(f"coiled spring ({ath_pct:.0f}% from ATH, RSI {rsi:.1f}) (+1)")
+        reasons.append(f"deeply oversold RSI {rsi:.1f} (+1)")
 
     # SEC/CFTC commodity — quality signal
     if symbol in SEC_COMMODITY_TOKENS:
@@ -1083,23 +1095,7 @@ def _save_pump_watchlist(watchlist: dict) -> None:
 
 
 def _quick_scam_news_check(symbol: str, name: str = "") -> str:
-    """
-    Search news for scam/rug signals on a pump coin.
-    Returns a short reason string if found, "" if clean.
-    """
-    _SCAM_WORDS = {
-        "rug pull", "rugpull", "exit scam", "scam", "fraud",
-        "ponzi", "honeypot", "abandoned", "team dumped", "manipulation",
-    }
-    try:
-        from src.connectors.web_research import search_cryptocompare_news
-        for article in search_cryptocompare_news(symbol, limit=6):
-            title = article.get("title", "").lower()
-            for w in _SCAM_WORDS:
-                if w in title:
-                    return article["title"][:70]
-    except Exception:
-        pass
+    """News disabled — manual check via Perplexity. Always returns clean."""
     return ""
 
 
@@ -1314,23 +1310,12 @@ def _build_whale_ride(coin: dict, crash_reason: str, prev_trades: list[dict]) ->
         except (ValueError, KeyError):
             pass
 
-    # News Analyst
-    from src.agents.news_analyst.analyst import NewsAnalyst
-    from src.connectors.web_research import fetch_news_for_coins
-    
-    analyst = NewsAnalyst()
-    news_items = fetch_news_for_coins([coin], limit_per_coin=3).get(symbol, [])
-    news_data = analyst.analyze_news(symbol, news_items)
-    if isinstance(news_data, list):
-        news_data = news_data[0] if (news_data and isinstance(news_data[0], dict)) else {}
-    if not isinstance(news_data, dict):
-        news_data = {}
+    news_score_val = 0
+    news_verdict   = "neutral"
+    news_summary   = ""
+    news_analyzed  = False
 
-    news_verdict = news_data.get("verdict", "neutral")
-    news_summary = news_data.get("summary", "No summary")
-    news_score_val = news_data.get("score", 0)
-
-    print(f"  🐋 {symbol} (News Score: {news_score_val}) - {news_summary}")
+    print(f"  🐋 {symbol} whale ride candidate")
 
     return {
         "symbol":         symbol,
@@ -1351,7 +1336,9 @@ def _build_whale_ride(coin: dict, crash_reason: str, prev_trades: list[dict]) ->
         "change_7d":      coin.get("price_change_percentage_7d_in_currency") or 0,
         "market_cap":     coin.get("market_cap") or 0,
         "news_score":     news_score_val,
-        "news_summary":   news_summary
+        "news_verdict":   news_verdict,
+        "news_summary":   news_summary,
+        "news_analyzed":  news_analyzed,
     }
 
 
@@ -1493,17 +1480,28 @@ def run_smart_scanner(
         print("  ERROR: no coin data from any source")
         return [], [], [], 0, {}
 
-    # 1c. Determine Market Regime (BTC/ETH performance)
+    # 1c. Determine Market Regime — BTC/ETH 24h + BTC dominance
     btc_ch24 = next((c.get("price_change_percentage_24h", 0) for c in coins if c.get("symbol") == "BTC"), 0)
     eth_ch24 = next((c.get("price_change_percentage_24h", 0) for c in coins if c.get("symbol") == "ETH"), 0)
-    
-    is_risk_off = (btc_ch24 < -3.0 and eth_ch24 < -3.0)
-    regime_penalty = 15 if is_risk_off else 0
-    
+
+    from src.connectors.coingecko import fetch_btc_dominance as _fetch_btc_dom
+    _btc_dominance = _fetch_btc_dom()
+
+    is_risk_off  = (btc_ch24 < -3.0 and eth_ch24 < -3.0)
+    _btc_season  = _btc_dominance >= 59.0
+
+    # _macro_penalty is subtracted from every coin's final score.
+    # Risk-off (BTC+ETH both dumping hard): -4  — altcoins bleed hardest
+    # BTC Season (dominance ≥ 59%): -3           — capital draining to BTC; need score 11+ to enter
+    # Neutral: 0
+    _macro_penalty = 4 if is_risk_off else (3 if _btc_season else 0)
+
     if is_risk_off:
-        print(f"  ⚠️  MARKET REGIME: RISK-OFF (BTC {btc_ch24:+.1f}%, ETH {eth_ch24:+.1f}%) — score penalty applied (-15)")
+        print(f"  🛑 RISK-OFF (BTC {btc_ch24:+.1f}%, ETH {eth_ch24:+.1f}%, BTC.D {_btc_dominance:.1f}%) — macro penalty -{_macro_penalty} per coin")
+    elif _btc_season:
+        print(f"  ⚠️  BTC SEASON (BTC.D {_btc_dominance:.1f}% ≥ 59%) — altcoin macro penalty -{_macro_penalty} per coin")
     else:
-        print(f"  ✅ MARKET REGIME: STABLE/BULLISH")
+        print(f"  ✅ ALTCOIN FAVORABLE (BTC.D {_btc_dominance:.1f}%)")
 
     # 3. Filter out stablecoins, wrapped tokens, tokenized stocks, wash traders, and permanently excluded
     excluded = STABLECOINS | WRAPPED_TOKENS | TOKENIZED_STOCKS | WASH_TRADING_CONFIRMED | PERMANENTLY_EXCLUDED
@@ -1666,8 +1664,10 @@ def run_smart_scanner(
         pass
 
     # 4e. Real-time risk assessment — replaces all hardcoded scam/rug-pull lists.
+    print("  Debug: Risk assessment starting...")
     from src.agents.coin_risk_assessor import assess_coin_risks
     risk_map = assess_coin_risks(exchange_coins, fear_greed={"value": 50, "label": "Neutral"})
+    print(f"  Debug: Risk assessment done ({len(risk_map)} coins).")
 
     rug_pull_coins: list[tuple[str, float, str]] = []
     whale_rides:    list[dict] = []
@@ -1692,7 +1692,8 @@ def run_smart_scanner(
             crash_reason = risk.reasoning if risk else cat
             if risk and risk.flags:
                 crash_reason = risk.flags[0] + " | " + (risk.reasoning or "")
-            whale_rides.append(_build_whale_ride(coin, crash_reason[:200], prev))
+            _wr = _build_whale_ride(coin, crash_reason[:200], prev)
+            whale_rides.append(_wr)
 
         elif cat in ("DEAD_PROJECT", "SUSPICIOUS"):
             # Short-term focus: a "dead" coin with volume and a catalyst is a valid bounce trade
@@ -1725,9 +1726,6 @@ def run_smart_scanner(
     sector_avgs = _compute_sector_avgs(exchange_coins)
     print("  Debug: Sector averages complete.")
 
-    # News analysis deferred to per-coin loop (Top 50 only)
-    per_coin_news = {}
-
     # 6. Pre-build CG ID map once (avoids one CG API call per coin in the loop)
     global _cg_id_cache
     try:
@@ -1752,55 +1750,6 @@ def run_smart_scanner(
         coin_id = coin["id"]
         symbol = coin["symbol"].upper()
         
-        # ── Conservative Engine Scoring (Base: 50) ──
-        score = 50
-        reasons = []
-        # [NEWS LOGIC DISABLED]
-        # Trend Alignment — Max +15
-        if coin.get("price_change_percentage_7d_in_currency", 0) > 0:
-            score += 15
-            reasons.append("Trend Alignment (+15)")
-        
-        # Technicals — Max +15
-        ta_data = _fetch_ta_data(coin)
-        if ta_data:
-            if ta_data.get("rsi", 50) < 40:
-                score += 5; reasons.append("Oversold RSI (+5)")
-            if ta_data.get("macd_bullish", False):
-                score += 5; reasons.append("Bullish MACD (+5)")
-            # Add BB Logic if available...
-
-        # Penalties
-        score -= regime_penalty
-        if regime_penalty > 0:
-            reasons.append(f"Regime Penalty (-{regime_penalty})")
-
-        # R:R Gate (Assume 2.0x TP / 0.9x SL for initial screening)
-        # Entry = price, SL = 0.9*price, TP = 1.2*price => 2.0x Reward:Risk
-        rr_val = 0.0
-        cur_price = coin.get("current_price", 0)
-        if cur_price > 0:
-            reward = (1.2 * cur_price) - cur_price
-            risk = cur_price - (0.9 * cur_price)
-            rr_val = reward / risk
-        
-        if rr_val < 1.8:
-            score -= 30
-            reasons.append(f"R:R too low ({rr_val:.1f})")
-
-        ch7d = coin.get("price_change_percentage_7d_in_currency", 0)
-        rsi_val = ta_data.get("rsi", 0) if ta_data else 0
-        macd_val = "Bull" if (ta_data and ta_data.get("macd_bullish")) else "Bear"
-        print(f"  Scanning {i+1}/{total_candidates}: {symbol:8s} - score: {score:2d} | 7d: {ch7d:+6.1f}% | RSI: {rsi_val:4.1f} | MACD: {macd_val}")
-
-        # Filter: Only actionable scores
-        if score < 85:
-            continue
-            
-        coin["score"] = score
-        coin["reasons"] = reasons
-        coin["recommended_order"] = "LONG"
-        results.append(coin)
         try:
             ohlcv = _fetch_ohlcv_for_coin(coin, days=30)
             if not ohlcv or len(ohlcv) < _MIN_CANDLES:
@@ -1813,7 +1762,6 @@ def run_smart_scanner(
             wash_bonus = 2 if is_wash else 0
 
             ta    = compute_ta(coin_id, symbol, ohlcv)
-            print(f"  {symbol} - scanned")
             vm    = round((coin.get("total_volume") or 0) / max(coin.get("market_cap") or 1, 1), 3)
             # These must be resolved before scoring calls
             trend_val = getattr(ta, "trend", None)
@@ -1976,7 +1924,16 @@ def run_smart_scanner(
 
 
             circ_cap_reason = []
-            raw_score = qs + ts + cs + ns + ss + proven_score + wash_bonus
+
+            _pre_score = qs + ts + cs + ss + proven_score + wash_bonus
+            ns, nr = 0, []  # news disabled — checked manually via Perplexity
+
+            raw_score = _pre_score + ns - _macro_penalty
+
+            _ch7d_log  = coin.get("price_change_percentage_7d_in_currency", 0)
+            _rsi_str   = f"{ta.rsi_14:.0f}" if ta.rsi_14 is not None else "n/a"
+            _macd_str  = "Bull" if ta.macd_signal == "BULLISH" else ("Bear" if ta.macd_signal == "BEARISH" else "Neut")
+            print(f"  Scanning {i+1}/{total_candidates}: {symbol:8s} - score: {raw_score:+2d} | 7d: {_ch7d_log:+6.1f}% | RSI: {_rsi_str:>3} | MACD: {_macd_str}")
 
             # Gate: score ≤ 0 → skip entirely
             if raw_score <= 0:
@@ -2104,12 +2061,13 @@ def run_smart_scanner(
                 "deep_dip_tb":      deep_dip_tb,        # +1 → prioritized in top 3
                 "security_status":  risk_info.category if risk_info else "NORMAL",
                 "liquidity_usd":    0.0,  # updated later
+                "news_score":       ns,   # raw news points: >0 bullish, <0 bearish, 0 none/neutral
             })
             rsi_str  = f"RSI={ta.rsi_14:.0f}" if ta.rsi_14 else "RSI=n/a"
             bb_str   = f"BB={ta.bollinger_position}" if ta.bollinger_position else "BB=n/a"
             # print(f" score={raw_score:+d}  {rsi_str}  {bb_str}  candles={len(ohlcv)}")
         except Exception as _e:
-            print(f" ERROR: {_e}")
+            print(f"  Scanning {i+1}/{total_candidates}: {symbol:8s} - ERROR: {_e}")
 
         time.sleep(0.11 if _cp_ok else 2)  # CP: 10 req/sec; CG: ~30 req/min
 
@@ -2159,13 +2117,18 @@ def run_smart_scanner(
         normal_results = [r for r in normal_results if r["symbol"].upper() not in approaching_tp]
 
     # 13. God-Tier Liquidity Check (DexScreener)
-    # Perform for high-potential candidates to ensure we can actually exit
-    print(f"  Performing on-chain liquidity checks for top {len(normal_results[:30])} picks...")
+    # Check all coins with score >= 3 (the tier-spot threshold) — these are the only ones
+    # that can enter the final 24 spots, so every one of them must be liquidity-checked.
+    # Coins below score 3 are never picked, so skipping their check saves API calls.
+    _liq_candidates  = sorted(normal_results, key=lambda x: x.get("score", 0), reverse=True)
+    _liq_to_check    = [r for r in _liq_candidates if r.get("score", 0) >= 3]
+    _liq_skip        = [r for r in _liq_candidates if r.get("score", 0) < 3]
+    print(f"  Performing on-chain liquidity checks for {len(_liq_to_check)} coins (score ≥ 3)...")
     from src.connectors.dexscreener import fetch_dex_liquidity
     from src.connectors.coingecko import fetch_platform_info
-    
+
     filtered_results = []
-    for r in normal_results[:30]:
+    for r in _liq_to_check:
         try:
             cid = r.get("id") or r.get("coin_id")
             liq = 0.0
@@ -2174,14 +2137,14 @@ def run_smart_scanner(
                 liq = fetch_dex_liquidity(r["symbol"], info.get("address"))
             else:
                 liq = fetch_dex_liquidity(r["symbol"])
-            
+
             r["liquidity_usd"] = liq
-            
+
             # Hard exclusion gate: skip coins with less than $50k liquidity
             if liq > 0 and liq < 50_000:
                 print(f"  🚫 SKIP {r['symbol']}: Liquidity too low (${liq/1e3:.0f}k)")
                 continue
-                
+
             if liq >= 50_000:
                 if liq < 100_000:
                     r["score"] -= 2
@@ -2191,63 +2154,32 @@ def run_smart_scanner(
                     r["reasons"].append(f"Deep liquidity (${liq/1e6:.1f}M)")
             filtered_results.append(r)
         except Exception:
-            filtered_results.append(r) # Keep if liquidity check fails
-            
-    # Include the rest of the results that weren't checked for liquidity
-    final_results = filtered_results + normal_results[30:]
+            filtered_results.append(r)  # keep if liquidity check fails
+
+    # Coins below threshold never enter tier spots — include unchecked
+    final_results = filtered_results + _liq_skip
     
     # ── FINAL RANKING DISPLAY ──
-    # Display ALL analyzed coins sorted by score, separating Actionable vs Watchlist
     sorted_results = sorted(final_results, key=lambda x: x.get("score", 0), reverse=True)
-    
-    print(f"\n  MOST VALUABLE OPPORTUNITIES (TOP 10 RANKED)\n" + "=" * 60)
-    
-    # Top 10 (Actionable or Watchlist)
-    for rank, r in enumerate(sorted_results[:10], 1):
-        label = "🔥 ACTIONABLE " if r.get("score", 0) >= 85 else "👀 WATCHLIST "
-        _print_pick(rank, r, _catalysts, label=label)
 
-    # Filter into categories for the return
-    top_longs  = [r for r in final_results if r.get("recommended_order") == "LONG" and r.get("score", 0) >= 85]
-    top_shorts = [r for r in final_results if r.get("recommended_order") == "SHORT" and r.get("score", 0) >= 85]
-    top_spots  = [r for r in final_results if r.get("recommended_order") == "SPOT" and r.get("score", 0) >= 85]
-    top10 = [r for r in sorted_results if r.get("score", 0) >= 85]
+    # Tier spots: top coins that clear the minimum threshold, capped at 24
+    top_spots = [r for r in sorted_results if r.get("score", 0) >= 3][:24]
+    top10     = sorted_results[:10]   # kept for backward-compat return value
 
-    # Fetch 1-sentence news catalysts for actual picks
-    picks_to_fetch = top_longs + top_shorts + top_spots
-    if not picks_to_fetch: picks_to_fetch = top10
+    # Fetch 1-sentence news catalysts for the top tier picks
     _catalysts: dict[str, str] = {}
     try:
         from src.connectors.web_research import get_top10_catalysts as _get_catalysts
-        _catalysts = _get_catalysts(picks_to_fetch)
+        _catalysts = _get_catalysts(top_spots)
     except Exception:
         pass
 
-    print(f"\n  MOST VALUABLE OPPORTUNITIES (TOP PICKS BY CATEGORY)\n" + "=" * 60)
-    
-    if top_longs:
-        print(f"\n  🚀  TOP LONG PICKS")
-        print("-" * 30)
-        for rank, r in enumerate(top_longs, 1):
-            _print_pick(rank, r, _catalysts)
-    else:
-        print("\n  🚀  TOP LONG PICKS: none found")
-
-    if top_shorts:
-        print(f"\n  📉  TOP SHORT PICKS")
-        print("-" * 30)
-        for rank, r in enumerate(top_shorts, 1):
-            _print_pick(rank, r, _catalysts)
-    else:
-        print("\n  📉  TOP SHORT PICKS: none found")
-
     if top_spots:
-        print(f"\n  💰  TOP SPOT PICKS")
-        print("-" * 30)
+        print(f"\n  💰  TIER SPOTS — {len(top_spots)}/24 coins with score ≥ 3\n" + "=" * 60)
         for rank, r in enumerate(top_spots, 1):
             _print_pick(rank, r, _catalysts)
     else:
-        print("\n  💰  TOP SPOT PICKS: none found")
+        print(f"\n  💰  TIER SPOTS: none found (all coins scored < 3)")
 
     # ── HOLD positions display (always show) ──
     if open_positions:
@@ -2275,7 +2207,7 @@ def run_smart_scanner(
                 print(f"\n  🐋 {sym:8s} {_pfmt(p)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: ${m:.0f}M")
                 print(f"     DO NOT CHASE — wait for crash >60% from peak, then auto whale ride{wins_str}")
                 print(f"     Reason: {pc['reason']}")
-                print(f"     Watchlisted ✓  |  Target entry: SL -25% / TP +100% / max 48h / max ${WHALE_RIDE_MAX_USD:.0f}")
+                print(f"     Watchlisted ✓  |  Target entry: SL -25% / TP +100% / max 24h or momentum slows / max ${WHALE_RIDE_MAX_USD:.0f}")
             elif act == "MONITORING":
                 print(f"\n  🔍 {sym:8s} {_pfmt(p)}  |  7d: {ch7d:+.0f}%  24h: {ch24:+.1f}%  MCap: ${m:.0f}M")
                 print(f"     NEW PUMP — monitoring for post-crash whale ride opportunity")
@@ -2308,7 +2240,7 @@ def run_smart_scanner(
             else:
                 print(f"\n  🐋 AUTO WHALE RIDE: {sym} {_pfmt(p)}  (crashed {abs(drop):.0f}% from pump peak)")
                 print(f"     Entry: {_pfmt(p)} | SL: {_pfmt(sl)} (-10%) | TP: {_pfmt(tp)} (+100%)")
-                print(f"     Max hold: 48h | Max position: ${WHALE_RIDE_MAX_USD:.0f}")
+                print(f"     Max hold: 24h or momentum slows | Max position: ${WHALE_RIDE_MAX_USD:.0f}")
                 print(f"     Pattern: {cycles_str}")
                 print(f"     Reason: {wr['crash_reason']}")
 
@@ -2376,7 +2308,7 @@ def run_smart_scanner(
 
     # ── Telegram summary ────────
     try:
-        _send_telegram_valuable(top_longs, top_shorts, top_spots, all_whale_rides, fear_greed)
+        _send_telegram_valuable(top_spots, all_whale_rides, fear_greed)
     except Exception as _tg_e:
         print(f"  ⚠️  Telegram valuable summary failed: {_tg_e}")
 
@@ -2399,15 +2331,8 @@ def run_smart_scanner(
             valuable_wr.append(wr)
 
     # ── Final Return ──
-    # returns: (generic top 10, pump list, valuable whale rides, quality count, news catalysts, and specific categories)
-    quality_count = len(top_longs) + len(top_shorts) + len(top_spots)
-
-    # Bundle categories for run.py
-    categories = {
-        "longs":  top_longs,
-        "shorts": top_shorts,
-        "spots":  top_spots,
-    }
+    quality_count = len(top_spots)
+    categories    = {"spots": top_spots}
     return top10, pump_coins, valuable_wr, quality_count, _catalysts, categories
 
 
@@ -2440,13 +2365,11 @@ def _print_pick(rank: int, r: dict, catalysts: dict, label: str = "") -> None:
 
 
 def _send_telegram_valuable(
-    longs: list[dict],
-    shorts: list[dict],
     spots: list[dict],
     whale_rides: list[dict],
     fear_greed: dict,
 ) -> None:
-    """Send valuable LONG/SHORT/SPOT picks to Telegram."""
+    """Send tier SPOT picks and whale rides to Telegram."""
     from src.utils.telegram import send_telegram
 
     def _f(v):
@@ -2456,21 +2379,11 @@ def _send_telegram_valuable(
 
     fg_val   = (fear_greed or {}).get("value", 50)
     fg_label = (fear_greed or {}).get("label", "?")
-    
-    msg = f"<b>💎 MOST VALUABLE PICKS — F&amp;G {fg_val}/100</b>\n"
-    
-    if longs:
-        msg += "\n🚀 <b>TOP LONGS:</b>\n"
-        for i, r in enumerate(longs, 1):
-            msg += f"  {i}. <b>{r['symbol']}</b> @ {_f(r['price'])} (Score {r['score']})\n"
-    
-    if shorts:
-        msg += "\n📉 <b>TOP SHORTS:</b>\n"
-        for i, r in enumerate(shorts, 1):
-            msg += f"  {i}. <b>{r['symbol']}</b> @ {_f(r['price'])} (Score {r['score']})\n"
+
+    msg = f"<b>💎 TIER SPOTS — F&amp;G {fg_val}/100 ({fg_label})</b>\n"
 
     if spots:
-        msg += "\n💰 <b>TOP SPOTS:</b>\n"
+        msg += f"\n💰 <b>SPOTS ({len(spots)} coins):</b>\n"
         for i, r in enumerate(spots, 1):
             msg += f"  {i}. <b>{r['symbol']}</b> @ {_f(r['price'])} (Score {r['score']})\n"
 
@@ -2481,7 +2394,7 @@ def _send_telegram_valuable(
         for wr in val_wr:
             msg += f"  🐋 <b>{wr['symbol']}</b> (Cycle #{wr['cycle_number']}) — {wr['crash_reason'][:50]}...\n"
 
-    if not longs and not shorts and not spots and not val_wr:
+    if not spots and not val_wr:
         msg += "\n<i>No high-confidence opportunities found this cycle.</i>"
 
     send_telegram(msg)

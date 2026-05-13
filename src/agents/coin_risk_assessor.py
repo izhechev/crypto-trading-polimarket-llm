@@ -331,107 +331,29 @@ def assess_coin_risks(
         if serious:
             flagged_serious[sym] = serious
 
-    # Step 3 — news search only for coins with crash/panic/rug signals (not dilution-only)
+    # Step 3 — skip network news search (Reddit/CryptoCompare too slow for 3000 coins).
+    # On-chain flags + heuristics are reliable enough for whale ride / exclusion decisions.
     flagged_news: dict[str, list[str]] = {}
-    dilution_only = set(flagged_onchain) - set(flagged_serious)
-    if dilution_only:
-        # print(f"  ℹ️  {len(dilution_only)} dilution-only coin(s) — no news check (scoring flag only): "
-        #       f"{', '.join(sorted(dilution_only))}")
-        pass
-    if flagged_serious:
-        # print(f"  📰 News check for {len(flagged_serious)} crash/panic/rug coin(s): "
-        #       f"{', '.join(flagged_serious)}")
-        coin_map = {c.get("symbol","").upper(): c for c in to_assess}
-        for sym, flags in flagged_serious.items():
-            coin = coin_map.get(sym, {})
-            name = coin.get("name", sym)
-            try:
-                hits = _news_flags(sym, name)
-            except Exception:
-                hits = []
-            flagged_news[sym] = hits
-            if hits:
-                # print(f"    ⚠️  {sym}: {len(hits)} scam mention(s) in news/Reddit")
-                pass
 
-    # Step 4 — batch Groq verdict for coins with any flags
-    verdicts: dict[str, dict] = {}
-    all_flagged_syms = set(flagged_onchain) | set(flagged_news)
-    if all_flagged_syms:
-        try:
-            from src.utils.llm_client import LLMClient
-            llm = LLMClient()
-            batch = [
-                (sym, flagged_onchain.get(sym, []), flagged_news.get(sym, []))
-                for sym in all_flagged_syms
-            ]
-            prompt = f"Analyze coins for scam risk: {json.dumps(batch)}"
-            verdicts = llm.call(prompt, system_prompt="You are a risk assessor. Return a JSON dict where keys are symbols and values are {'verdict': '...', 'reasoning': '...'}.")
-        except Exception as e:
-            # print(f"  [risk] Groq unavailable: {e}")
-            pass
-
+    # Step 4 — heuristic verdict only (no LLM/network calls for speed)
     # Step 5 — build RiskAssessment for all assessed coins
     for coin in to_assess:
-        sym   = coin.get("symbol", "").upper()
-        of    = flagged_onchain.get(sym, [])
-        nh    = flagged_news.get(sym, [])
-        v     = verdicts.get(sym, {})
+        sym = coin.get("symbol", "").upper()
+        of  = flagged_onchain.get(sym, [])
 
-        if not of and not nh:
-            # No flags at all — skip Groq, mark NORMAL
+        if not of:
             ra = RiskAssessment(symbol=sym, category="NORMAL",
                                 flags=[], news_hits=[], reasoning="No risk signals detected.")
         else:
-            category  = v.get("category", _heuristic_category(of, nh))
-            reasoning = v.get("reasoning", "; ".join(of[:2]))
-            ra = RiskAssessment(
-                symbol=sym, category=category,
-                flags=of, news_hits=nh, reasoning=reasoning,
-            )
-            icon = {"DEAD_PROJECT":"💀","ACTIVE_SCAM":"🚨",
-                    "MANIPULATED_REAL":"⚠️ ","SUSPICIOUS":"🔶","NORMAL":"✅"}.get(category, "❓")
-            # print(f"  {icon} {sym}: {category} — {reasoning[:80]}")
+            category  = _heuristic_category(of, [])
+            reasoning = "; ".join(of[:2])
+            ra = RiskAssessment(symbol=sym, category=category,
+                                flags=of, news_hits=[], reasoning=reasoning)
 
         results[sym] = ra
         cache[sym]   = ra
 
-    # Step 6 — God-Tier Security: GoPlus Audit
-    # Perform security audit for suspicious or highly volatile small caps
-    for sym, ra in results.items():
-        if ra.category == "NORMAL" and any(r.get("symbol", "").upper() == sym for r in to_assess):
-            coin = next(r for r in to_assess if r.get("symbol", "").upper() == sym)
-            mcap = coin.get("market_cap", 1e10)
-            if mcap < 100_000_000:
-                try:
-                    from src.connectors.coingecko import fetch_platform_info
-                    from src.connectors.goplus import fetch_token_security, is_honeypot, get_total_tax
-                    
-                    cid = coin.get("id")
-                    if cid:
-                        info = fetch_platform_info(cid)
-                        if info and info.get("address"):
-                            sec = fetch_token_security(info["chain"], info["address"])
-                            if sec:
-                                if is_honeypot(sec):
-                                    ra.category = "ACTIVE_SCAM"
-                                    ra.flags.append("HONEYPOT_DETECTED")
-                                    ra.reasoning += " | GoPlus: HONEYPOT detected."
-                                
-                                tax = get_total_tax(sec)
-                                if tax > 15.0:
-                                    ra.category = "ACTIVE_SCAM"
-                                    ra.flags.append(f"HIGH_TAX_{tax:.0f}%")
-                                    ra.reasoning += f" | GoPlus: High Tax ({tax:.0f}%)."
-                                
-                                if sec.get("is_proxy") == "1":
-                                    ra.flags.append("PROXY_CONTRACT")
-                                    ra.reasoning += " | GoPlus: Proxy."
-                                
-                                if sec.get("is_mintable") == "1":
-                                    ra.flags.append("MINTABLE")
-                                    ra.reasoning += " | GoPlus: Mintable."
-                except Exception: pass
+    # Step 6 — GoPlus audit skipped (too slow for 3000-coin scans)
 
     _save_cache(cache)
     return results

@@ -243,22 +243,6 @@ def analyze_with_groq(
 
         signals = f"   signals: {', '.join(r['reasons']) if r['reasons'] else 'none'}"
 
-        # Per-coin news headlines — each item is {"title": str, "age_days": int|None, "source": str}
-        sym_news = per_coin_news.get(r["symbol"], [])
-        if sym_news:
-            news_lines_parts = []
-            for item in sym_news:
-                title  = item.get("title", "") if isinstance(item, dict) else str(item)
-                age    = item.get("age_days") if isinstance(item, dict) else None
-                source = item.get("source", "") if isinstance(item, dict) else ""
-                if age is None:
-                    age = 0 if source == "GoogleNews" else (3 if source == "Reddit" else None)
-                age_tag = f"({age}d ago)" if age is not None else "(date unknown)"
-                news_lines_parts.append(f"     • {age_tag} [{source}] {title[:90]}")
-            news_block = "   news:\n" + "\n".join(news_lines_parts)
-        else:
-            news_block = "   news: none found"
-
         # Tavily web catalyst — 1-sentence AI summary from live web search
         tavily_line = ""
         if tavily_catalysts:
@@ -266,14 +250,13 @@ def analyze_with_groq(
             if cat:
                 tavily_line = f"\n   web catalyst (Tavily): {cat}"
 
-        lines.append(f"{coin_header}\n{signals}\n{news_block}{tavily_line}")
+        lines.append(f"{coin_header}\n{signals}{tavily_line}")
 
     coins_text = "\n\n".join(lines)
 
-    news_section       = f"\nADDITIONAL MARKET NEWS:\n{news_text}\n" if news_text else ""
     enrichment_section = f"\nMARKET INTELLIGENCE:\n{enrichment_text}\n" if enrichment_text else ""
 
-    prompt = f"""SHORT-TERM SCAN — top candidates with news (timeframe: 3–14 days max):
+    prompt = f"""SHORT-TERM SCAN — top candidates (timeframe: 3–14 days max):
 
 IMPORTANT — BIAS VALIDATION:
 Each coin has a technical BIAS (LONG, SHORT, or SPOT) provided in the list below.
@@ -293,7 +276,7 @@ If a coin has RSI >75, skip it and take the next one in order.
 
 {coins_text}
 
-Fear & Greed Index: {fg_value}/100 ({fg_label}).{news_section}{enrichment_section}
+Fear & Greed Index: {fg_value}/100 ({fg_label}).{enrichment_section}
 
 SHORT-TERM SCORING — apply these adjustments before deciding:
 +3 pts: Concrete catalyst in news (0–7d ago): upgrade, ETF, institutional buy, mainnet, partnership, CME futures
@@ -463,7 +446,52 @@ Rank the candidates from best to worst.
             response_format={"type": "json_object"},
         )
     except Exception as e:
+        err_str = str(e)
         print(f"  ERROR calling Groq API: {e}")
+        # Daily token limit hit → try Gemini as fallback
+        if "tokens per day" in err_str or "TPD" in err_str or "per day" in err_str:
+            try:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    import google.generativeai as _genai
+                if config.GEMINI_API_KEY:
+                    print("  Groq daily limit hit — falling back to Gemini...")
+                    _genai.configure(api_key=config.GEMINI_API_KEY)
+                    _gmodel = _genai.GenerativeModel("gemini-2.0-flash-lite")
+                    _gresp  = _gmodel.generate_content(
+                        f"You are a SHORT-TERM crypto trader. Respond with valid JSON only.\n\n{prompt}"
+                    )
+                    _gtext = _gresp.text.replace("```json", "").replace("```", "").strip()
+                    _start = _gtext.find("{")
+                    _end   = _gtext.rfind("}") + 1
+                    _parsed = json.loads(_gtext[_start:_end]) if _start >= 0 else {}
+                    if _parsed.get("picks"):
+                        print(f"  ✅ Gemini returned {len(_parsed['picks'])} pick(s)")
+                        raw_picks = _parsed["picks"]
+                        # Jump directly to dedup+processing
+                        _CONF_ORDER = {"high": 3, "medium": 2, "low": 1}
+                        _seen_coins: dict[str, dict] = {}
+                        for _pick in raw_picks:
+                            _sym_g = (_pick.get("coin") or "").upper()
+                            if not _sym_g:
+                                continue
+                            _conf_g = (_pick.get("confidence") or "low").lower()
+                            if _sym_g not in _seen_coins:
+                                _seen_coins[_sym_g] = _pick
+                            else:
+                                if _CONF_ORDER.get(_conf_g, 0) > _CONF_ORDER.get((_seen_coins[_sym_g].get("confidence") or "low").lower(), 0):
+                                    _seen_coins[_sym_g] = _pick
+                        raw_picks = list(_seen_coins.values())
+                        _price_map_g = {r.get("symbol", "").upper(): r.get("price", 0) for r in top10}
+                        for _pick in raw_picks:
+                            _sym_g = (_pick.get("coin") or "").upper()
+                            _ep_g  = _pick.get("entry_price")
+                            if (not _ep_g or (isinstance(_ep_g, (int, float)) and _ep_g <= 0)) and _sym_g in _price_map_g:
+                                _pick["entry_price"] = _price_map_g[_sym_g]
+                        return raw_picks, groq_candidates
+            except Exception as _ge:
+                print(f"  Gemini fallback failed: {_ge}")
         return None, groq_candidates
 
     # ── Log the call ──────────────────────────────────────────────────────

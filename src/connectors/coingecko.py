@@ -354,6 +354,24 @@ def _fetch_ohlcv_live(coin_id: str, days: int, cache_key: str) -> list[dict]:
     return ohlcv
 
 
+def fetch_btc_dominance() -> float:
+    """Return BTC market cap dominance as a percentage (e.g. 60.3). 0.0 on failure."""
+    cache_key = "btc_dominance"
+    cached = _cache.get(cache_key)
+    if cached and time.time() - cached[0] < 1800:  # 30-min TTL
+        return cached[1]
+    try:
+        with httpx.Client(timeout=8, headers=_headers()) as client:
+            resp = _cg_get(client, f"{_base_url()}/global")
+        if resp.status_code == 200:
+            val = float(resp.json().get("data", {}).get("market_cap_percentage", {}).get("btc", 0))
+            _cache[cache_key] = (time.time(), val)
+            return val
+    except Exception:
+        pass
+    return 0.0
+
+
 def fetch_fear_greed() -> dict:
     """Fetch Fear & Greed Index (no API key needed)."""
     cache_key = "fear_greed"
