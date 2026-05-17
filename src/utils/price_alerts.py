@@ -385,17 +385,23 @@ def check_price_alerts() -> None:
                    f"  ❌ Position closed as LOSS.")
             continue
 
-        # Close condition 3: 24h timeout (LOSS unless already hit +10%)
+        # Close condition 3: 24h timeout — WIN >= +1%, NEUTRAL if |PnL| < 1%, LOSS <= -1%
         if hours_open_alert >= 24.0:
-            row["status"]     = "LOSS"
+            if pnl_pct >= 1.0:
+                outcome, icon = "WIN", "✅"
+            elif pnl_pct <= -1.0:
+                outcome, icon = "LOSS", "❌"
+            else:
+                outcome, icon = "NEUTRAL", "⏰"
+            row["status"]     = outcome
             row["exit_price"] = round(usd, 6)
             row["close_date"] = _now_str_alert
             dirty_csv = True
             side = "SHORT" if is_short else "LONG/SPOT"
-            print(f"  ⏰ LOSS ({side} 24h timeout): {row['coin']} {pnl_pct:+.1f}% after {hours_open_alert:.1f}h")
-            _alert(f"⏰ <b>LOSS (24h Timeout) — {row['coin']}</b>\n"
+            print(f"  {icon} {outcome} ({side} 24h timeout): {row['coin']} {pnl_pct:+.1f}% after {hours_open_alert:.1f}h")
+            _alert(f"{icon} <b>{outcome} (24h Timeout) — {row['coin']}</b>\n"
                    f"  PnL: {pnl_pct:+.1f}% after {hours_open_alert:.1f}h\n"
-                   f"  ❌ Position closed as LOSS.")
+                   f"  Position closed as {outcome}.")
             continue
 
         # ── Alerts for positions that are still OPEN ─────────────────────
